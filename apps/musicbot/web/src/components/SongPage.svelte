@@ -47,7 +47,7 @@
       {#if position}<div><dt>Position</dt><dd>{position}</dd></div>{/if}
       {#if song.duration != null}<div><dt>Length</dt><dd>{formatDuration(song.duration)}</dd></div>{/if}
       {#if details.year}<div><dt>Year</dt><dd>{details.year}</dd></div>{/if}
-      {#if details.genre}<div><dt>Genre</dt><dd>{details.genre}</dd></div>{/if}
+      {#if details.genre}<div><dt>Genre</dt><dd><a class="pill genre-chip" href={buildRoute({ view: "genre", library: song.library, name: details.genre })} title="Open the genre {details.genre}">{details.genre}</a></dd></div>{/if}
       {#if format}<div><dt>Format</dt><dd>{format}</dd></div>{/if}
       {#if details.play_count != null}<div><dt>Plays</dt><dd>{details.play_count.toLocaleString()}</dd></div>{/if}
     </dl>
@@ -101,6 +101,8 @@
   .facts { display: flex; flex-wrap: wrap; gap: 0.35rem 1.5rem; margin: 0.25rem 0 0; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
   .facts dt { color: var(--muted); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
   .facts dd { margin: 0; font-weight: 500; }
+  .genre-chip { display: inline-block; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; padding-block: 0.05rem; color: var(--fg); font-size: 0.85rem; }
+  .genre-chip:hover { border-color: var(--accent); color: var(--accent); }
   .action-link { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.9rem; }
   .group { margin-bottom: 2rem; }
   .lyrics-card { max-width: 46rem; padding: 0.75rem 0.5rem; }

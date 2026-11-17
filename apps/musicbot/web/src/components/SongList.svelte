@@ -11,9 +11,9 @@
   /**
    * `similarities` is optional and parallel to `songs`: OpenSubsonic scores, null when unknown.
    * `onremove(index, song)` adds a remove button to every row, for playlists the viewer edits.
-   * `positions` numbers the rows by their place in the list (playlists) instead of track numbers.
+   * `positions` numbers the rows by their place in the list (playlists, pages of songs) from `first`, instead of track numbers.
    */
-  let { songs, namespace, covers = false, similarities = null, onremove = null, positions = false } = $props();
+  let { songs, namespace, covers = false, similarities = null, onremove = null, positions = false, first = 1 } = $props();
   const current = $derived(namespace !== null && namespace === store.browseKey && store.connection === "open" && !store.invalid);
   const playing = $derived(store.player?.current?.entry.track ?? null);
   const sonic = (song) => current && store.supportsSonic(song.library) && store.browseItemCurrent({ library: song.library, namespace });
@@ -22,7 +22,7 @@
 <ol class="rows card" aria-label="Tracks">
   {#each songs as song, i (`${song.library}:${song.id}:${i}`)}
     <li draggable={current} ondragstart={(event) => startItemDrag(event, "song", song.library, song.id, song.title, namespace)}>
-      <span class="row-number">{positions ? i + 1 : song.track ?? i + 1}</span>
+      <span class="row-number">{positions ? first + i : song.track ?? i + 1}</span>
       {#if covers}<Cover library={song.library} art={song.cover_art} size={96} px={44} />{/if}
       <div class="row-text">
         <div class="row-title" title={song.title}><a href={buildRoute({ view: "song", library: song.library, id: song.id, namespace })} draggable="false">{song.title}</a></div>

@@ -30,6 +30,7 @@
     { name: "History", icon: "queue", route: { view: "history" }, views: ["history"] },
     { name: "Albums", icon: "album", route: { view: "albums", library: store.library, list: "newest" }, views: ["albums", "album", "song"] },
     { name: "Artists", icon: "artist", route: { view: "artists", library: store.library }, views: ["artists", "artist"] },
+    { name: "Genres", icon: "genre", route: { view: "genres", library: store.library }, views: ["genres", "genre"] },
     { name: "Playlists", icon: "playlist", route: { view: "playlists", library: store.library }, views: ["playlists", "playlist"] },
     { name: "Channels", icon: "channel", route: { view: "channels" }, views: ["channels"] },
     ...(store.snapshot?.import ? [{ name: "Add music", icon: "add", route: { view: "add", q: "" }, views: ["add", "addAlbum", "requests"] }] : []),

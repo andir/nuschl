@@ -13,12 +13,15 @@
   import Playlists from "./Playlists.svelte";
   import PlaylistTools from "./PlaylistTools.svelte";
   import AddToPlaylist from "./AddToPlaylist.svelte";
+  import Genres from "./Genres.svelte";
+  import GenreSongs from "./GenreSongs.svelte";
 
   let { route } = $props();
   let page = $state(0);
   const namespace = store.browseKey;
   const current = $derived(namespace !== null && namespace === store.browseKey && store.connection === "open" && !store.invalid);
   const sonicView = $derived(route.view === "similar" || route.view === "path");
+  const genreView = $derived(route.view === "genres" || route.view === "genre");
   const playlistView = $derived(route.view === "playlists" || route.view === "playlist");
   const result = resource(() => {
     if (!current || (route.library != null && !store.browseItemCurrent({ library: route.library, namespace }))
@@ -27,20 +30,27 @@
     if (playlistView) store.playlistRevision;
     if (route.view === "search") return route.q.trim() ? query("api/search", { q: route.q }) : null;
     if (route.view === "albums") return query("api/albums", { library: route.library, list: route.list, page });
+    if (route.view === "genre") return query("api/genre/albums", { library: route.library, name: route.name, page });
     if (route.view === "path") return query("api/path", { library: route.library, from: route.from, to: route.to });
     return query(`api/${route.view}`, { library: route.library, ...(route.id == null ? {} : { id: route.id }) });
   }, () => store.browseSignal, undefined, { keep: true });
   const data = $derived(current ? result.data : null);
-  const detail = $derived(sonicView ? null : data?.[route.view] ?? null);
+  const detail = $derived(sonicView || genreView ? null : data?.[route.view] ?? null);
+  // The genre page's counts come from the genre list.
+  const genreList = resource(() => (route.view === "genre" && current && store.browseItemCurrent({ library: route.library, namespace })
+    ? query("api/genres", { library: route.library }) : null), () => store.browseSignal);
+  const genre = $derived(current ? genreList.data?.genres?.find((entry) => entry.name === route.name) ?? null : null);
+  const amount = (value, one, many) => (Number.isInteger(value) ? `${value.toLocaleString()} ${value === 1 ? one : many}` : null);
   const songs = $derived(data?.songs ?? []);
   const matches = $derived(sonicView ? data?.matches ?? [] : []);
   const matchSongs = $derived(matches.map((match) => match.track));
   const sonicItem = $derived(route.view === "path"
     ? { kind: "path", library: route.library, id: route.from, to: route.to, namespace }
     : { kind: "similar", library: route.library, id: route.id, namespace });
-  const titles = { albums: "Albums", artists: "Artists", playlists: "Playlists", search: "Search" };
+  const titles = { albums: "Albums", artists: "Artists", genres: "Genres", playlists: "Playlists", search: "Search" };
   const heading = $derived(titles[route.view]
-    ?? (route.view === "similar" ? (data?.song ? `Similar to ${data.song.title}` : "Similar songs")
+    ?? (route.view === "genre" ? route.name
+      : route.view === "similar" ? (data?.song ? `Similar to ${data.song.title}` : "Similar songs")
       : route.view === "path" ? (matches.length ? `Blend: ${matches[0].track.title} → ${matches.at(-1).track.title}` : "Blend")
       : route.view === "song" ? data?.song?.title ?? (data ? "Song" : "Loading…")
       : detail?.name ?? "Loading…"));
@@ -123,6 +133,12 @@
       <button class="btn" disabled={!current || !data?.more || result.loading} onclick={() => changePage(page + 1)}>Next</button>
     </div>
   {/if}
+  {#if route.view === "genre" && genre}
+    <p class="muted metadata genre-counts">
+      {#if amount(genre.albums, "album", "albums")}<span>{amount(genre.albums, "album", "albums")}</span>{/if}
+      {#if amount(genre.songs, "song", "songs")}<span>{amount(genre.songs, "song", "songs")}</span>{/if}
+    </p>
+  {/if}
 
   {#if !current}
     <p class="notice muted" role="status">Library browsing will resume after the connection is restored.</p>
@@ -173,6 +189,22 @@
         </section>
       {/each}
       {#if !data.results.length}<p class="notice muted">No results.</p>{/if}
+    {:else if route.view === "genres"}
+      <Genres genres={data.genres} truncated={data.truncated} library={route.library} />
+    {:else if route.view === "genre"}
+      <section class="group" aria-labelledby="genre-albums">
+        <h2 id="genre-albums">Albums</h2>
+        <div class="media-grid">{#each data.albums as album (album.id)}<MediaCard item={album} {namespace} />{/each}</div>
+        {#if !data.albums.length}<p class="notice muted">{page === 0 ? "No albums in this genre." : "No more albums in this genre."}</p>{/if}
+        {#if page > 0 || data.more}
+          <div class="pagination bottom">
+            <button class="btn" disabled={page === 0 || result.loading} onclick={() => changePage(page - 1)}>Previous</button>
+            <span class="muted">Page {page + 1}</span>
+            <button class="btn" disabled={!data.more || result.loading} onclick={() => changePage(page + 1)}>Next</button>
+          </div>
+        {/if}
+      </section>
+      <GenreSongs library={route.library} name={route.name} {namespace} {current} />
     {:else if sonicView}
       <div class="sonic-header">
         {#if route.view === "path"}
@@ -251,9 +283,8 @@
   .share-problem { margin: -0.5rem 0 1.25rem; }
   .manual-link input { width: 100%; }
   .sort select { max-width: 100%; }
-  .pagination { display: flex; align-items: center; justify-content: center; gap: 1rem; margin: 0 0 1.25rem; font-variant-numeric: tabular-nums; }
-  .pagination.bottom { margin: 1.5rem 0 0; }
   .group { margin-bottom: 2rem; }
+  .genre-counts { margin: -0.75rem 0 0.5rem; }
   .jump { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0 0 0.5rem; padding: 0.5rem 0; background: var(--bg); }
   .jump .pill { justify-content: center; min-width: 2.2rem; min-height: 2rem; font-weight: 600; color: var(--fg); }
   .jump .pill:hover { border-color: var(--accent); color: var(--accent); }

@@ -112,10 +112,11 @@ function libraryIndex(text) {
 /**
  * Parses a location hash into a route object:
  * `{ view: "queue" | "channels" | "history" }`, `{ view: "albums", library, list }`,
- * `{ view: "artists" | "playlists", library }`,
+ * `{ view: "artists" | "playlists" | "genres", library }`, `{ view: "genre", library, name }`,
  * `{ view: "album" | "artist" | "playlist" | "song" | "similar", library, id, namespace? }`,
  * `{ view: "path", library, from, to, namespace? }`, `{ view: "search", q }`,
  * `{ view: "add", q }`, `{ view: "addAlbum", id }`, `{ view: "requests" }`.
+ * A genre route without a name gives the genres view.
  * A shared link (`library_key=`, see shareRoute) adds `sharedLibrary: key` to
  * library routes instead of a namespace; adoptSharedRoute resolves it.
  * Unknown hashes give the queue view; an invalid import album id gives the add view.
@@ -148,7 +149,13 @@ export function parseRoute(hash) {
     }
     case "artists":
     case "playlists":
+    case "genres":
       return { view, library: libraryIndex(params.get("library")), ...shared };
+    case "genre": {
+      const name = params.get("name");
+      const index = libraryIndex(params.get("library"));
+      return name ? { view, library: index, name, ...shared } : { view: "genres", library: index, ...shared };
+    }
     case "album":
     case "artist":
     case "playlist":
@@ -183,7 +190,10 @@ export function buildRoute(route) {
       return `#/albums?${new URLSearchParams({ library: String(route.library ?? 0), list: route.list ?? "newest" })}`;
     case "artists":
     case "playlists":
+    case "genres":
       return `#/${route.view}?library=${route.library ?? 0}`;
+    case "genre":
+      return `#/genre?${new URLSearchParams({ library: String(route.library ?? 0), name: route.name ?? "" })}`;
     case "album":
     case "artist":
     case "playlist":
@@ -211,6 +221,8 @@ function namespaceQuery(route) {
 export function routeForLibrary(route, library) {
   switch (route.view) {
     case "albums":
+    case "genres":
+    case "genre":
       return { ...route, library };
     case "artists":
     case "artist":
@@ -518,6 +530,20 @@ export function lyricLineAt(lines, ms) {
 export function artistJumps(groups) {
   return (Array.isArray(groups) ? groups : []).flatMap((group, index) =>
     Array.isArray(group?.artists) && group.artists.length ? [{ name: String(group.name), index }] : []);
+}
+
+/**
+ * The Genres page's list: the genres whose name contains `text` (trimmed,
+ * ignoring case), by name, or with `order` "size" by songs, then albums,
+ * largest first, then by name. Unknown counts count as 0.
+ */
+export function filterGenres(genres, text, order) {
+  const needle = String(text ?? "").trim().toLocaleLowerCase();
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const bySize = (a, b) => count(b.songs) - count(a.songs) || count(b.albums) - count(a.albums) || byName(a, b);
+  return (Array.isArray(genres) ? genres : [])
+    .filter((genre) => typeof genre?.name === "string" && genre.name.toLocaleLowerCase().includes(needle))
+    .sort(order === "size" ? bySize : byName);
 }
 
 /** Shortest text, in characters, the search field asks suggestions for. */

@@ -415,7 +415,8 @@ class Store {
       return;
     }
     const to = item.to == null ? {} : { to: item.to };
-    this.command({ command: "add", player, kind: item.kind, library: item.library, id: item.id, ...to, index }, this.browseSignal);
+    const page = item.page == null ? {} : { page: item.page };
+    this.command({ command: "add", player, kind: item.kind, library: item.library, id: item.id, ...to, ...page, index }, this.browseSignal);
   }
 
   attach(channel, player) {

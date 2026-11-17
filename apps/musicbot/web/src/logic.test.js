@@ -8,7 +8,7 @@ import {
   mergeHistory, libraryForNamespace, routeForNamespace, browseItemIsCurrent, similarityPercent, sonicPathStart,
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
-  groupPlaylists, editablePlaylists, lyricLineAt, artistJumps, suggestionQuery, suggestionStep,
+  groupPlaylists, editablePlaylists, lyricLineAt, artistJumps, suggestionQuery, suggestionStep, filterGenres,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -137,6 +137,8 @@ test("routes round trip, including awkward ids", () => {
     { view: "albums", library: 1, list: "starred" },
     { view: "artists", library: 0 },
     { view: "playlists", library: 3 },
+    { view: "genres", library: 2 },
+    { view: "genre", library: 1, name: "Rock" },
     { view: "search", q: "a b/c?d#e&f=g+h" },
     { view: "search", q: "" },
     { view: "add", q: "a b/c?d#e&f=g+h" },
@@ -144,6 +146,46 @@ test("routes round trip, including awkward ids", () => {
     { view: "addAlbum", id: "0123456789abcdef" },
     { view: "requests" },
   ]) assert.deepEqual(parseRoute(buildRoute(route)), route);
+});
+
+test("genre routes keep odd names in the query", () => {
+  const names = ["Rock; Pop", "R&B", "AC/DC Covers", "Drum + Bass", "50% & more", "a=b?c#d", "Música Popular Brasileira", "日本のロック", "x".repeat(200)];
+  for (const name of names) {
+    const route = { view: "genre", library: 2, name };
+    const hash = buildRoute(route);
+    assert.ok(hash.startsWith("#/genre?"), hash);
+    assert.equal(hash.indexOf("#", 1), -1, hash);
+    assert.equal(hash.indexOf("/", 2), -1, hash);
+    assert.deepEqual(parseRoute(hash), route);
+    const shared = shareRoute(route, ["k0", "k1", "k2"]);
+    assert.deepEqual(parseRoute(shared), { ...route, sharedLibrary: "k2" });
+  }
+  assert.equal(buildRoute({ view: "genre", library: 0, name: "R&B / Soul" }), "#/genre?library=0&name=R%26B+%2F+Soul");
+  assert.equal(buildRoute({ view: "genres", library: 1 }), "#/genres?library=1");
+  assert.deepEqual(parseRoute("#/genre?library=1&name=Jazz+Fusion"), { view: "genre", library: 1, name: "Jazz Fusion" });
+  assert.deepEqual(parseRoute("#/genre?library=1"), { view: "genres", library: 1 });
+  assert.deepEqual(parseRoute("#/genre?library=1&name="), { view: "genres", library: 1 });
+  assert.deepEqual(parseRoute("#/genres?library=x"), { view: "genres", library: 0 });
+  assert.deepEqual(routeForLibrary({ view: "genre", library: 0, name: "Jazz" }, 1), { view: "genre", library: 1, name: "Jazz" });
+  assert.deepEqual(routeForLibrary({ view: "genres", library: 0 }, 2), { view: "genres", library: 2 });
+});
+
+test("the genre list narrows by name and sorts by name or size", () => {
+  const genres = [
+    { name: "rock", albums: 2, songs: 30 },
+    { name: "Ambient", albums: 5, songs: 30 },
+    { name: "Électro", albums: null, songs: 80 },
+    { name: "Jazz Rock", albums: 1, songs: null },
+    { name: "Rockabilly", albums: 1, songs: 4 },
+  ];
+  const names = (list) => list.map((genre) => genre.name);
+  assert.deepEqual(names(filterGenres(genres, "", "name")), ["Ambient", "Électro", "Jazz Rock", "rock", "Rockabilly"]);
+  assert.deepEqual(names(filterGenres(genres, "", "size")), ["Électro", "Ambient", "rock", "Rockabilly", "Jazz Rock"]);
+  assert.deepEqual(names(filterGenres(genres, "  ROCK ", "name")), ["Jazz Rock", "rock", "Rockabilly"]);
+  assert.deepEqual(names(filterGenres(genres, "élec", "size")), ["Électro"]);
+  assert.deepEqual(filterGenres(genres, "polka", "name"), []);
+  assert.deepEqual(filterGenres(null, "", "name"), []);
+  assert.equal(genres[0].name, "rock", "the input keeps its order");
 });
 
 test("import routes", () => {
@@ -429,13 +471,14 @@ test("having the oldest retained play does not hide a refresh gap", () => {
 
 const TOKEN = "3f2b8c1e-9d4a-4e6f-8b7a-0c1d2e3f4a5b";
 const SHARE_IDS = ["plain", "a/b", "what?", "#hash", "with space", "50% & more", "ü/€?#=&+"];
-const LIBRARY_VIEWS = new Set(["albums", "artists", "playlists", "album", "artist", "playlist", "song", "similar", "path"]);
+const LIBRARY_VIEWS = new Set(["albums", "artists", "playlists", "genres", "genre", "album", "artist", "playlist", "song", "similar", "path"]);
 
 function everyRoute(library, namespace) {
   const routes = [
     { view: "queue" }, { view: "channels" }, { view: "history" },
     { view: "search", q: "a b/c?d#e&f=g+h" },
     { view: "albums", library, list: "starred" }, { view: "artists", library }, { view: "playlists", library },
+    { view: "genres", library }, { view: "genre", library, name: "R&B / Soul; 日本" },
     { view: "add", q: "a b/c?d#e&f=g+h" }, { view: "addAlbum", id: "0123456789abcdef" }, { view: "requests" },
   ];
   for (const id of SHARE_IDS) {
