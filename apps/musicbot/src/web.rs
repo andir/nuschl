@@ -6,7 +6,7 @@
 //! contract is described in docs/musicbot.md ("Web API").
 use crate::{
     Bot,
-    covers::{CoverKey, IMPORT_NAMESPACE},
+    covers::{CoverKey, IMPORT_NAMESPACE, ImageKey},
     import,
     player::{BrowserSubscription, Ducking, MAX_DUCK_HOLD},
     subsonic::{
@@ -28,7 +28,9 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     convert::Infallible,
     path::PathBuf,
     pin::Pin,
@@ -36,7 +38,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
+use tokio::sync::{OwnedMutexGuard, Semaphore, SemaphorePermit, mpsc};
 use uuid::Uuid;
 
 mod playlists;
@@ -51,15 +53,27 @@ static LIBRARY_CALLS: Semaphore = Semaphore::const_new(MAX_LIBRARY_CALLS);
 /// A body owns its slot until the SSE stream ends or is dropped. No waiters.
 const MAX_SSE_WATCHERS: usize = 32;
 static SSE_WATCHERS: Semaphore = Semaphore::const_new(MAX_SSE_WATCHERS);
-/// Includes fetching and the actual isolated worker exit, not HTTP lifetime.
+/// One worker run and its process exit, not HTTP lifetime.
 const MAX_COVER_JOBS: usize = 2;
 static COVER_JOBS: Semaphore = Semaphore::const_new(MAX_COVER_JOBS);
-/// Uncached covers that may wait for a job at once (a page of albums and some);
-/// more are refused at once.
+/// Encoded covers fetched at once. Cover fetches have their own admission, so
+/// they leave [`LIBRARY_CALLS`] to browsing and run while worker jobs are busy.
+const MAX_COVER_FETCHES: usize = 4;
+static COVER_FETCHES: Semaphore = Semaphore::const_new(MAX_COVER_FETCHES);
+/// Uncached covers that may wait for a fetch or a job at once (a page of
+/// albums and some); more are refused at once.
 const MAX_COVER_WAITERS: usize = 64;
 static COVER_WAITERS: Semaphore = Semaphore::const_new(MAX_COVER_WAITERS);
-/// How long an uncached cover waits for a job before it is refused.
+/// How long an uncached cover waits for a fetch, and then for a job, before
+/// it is refused.
 const COVER_WAIT: Duration = Duration::from_secs(10);
+/// How long a request waits for its worker job; the content worker's own
+/// exchange and exit deadlines are shorter.
+const COVER_JOB_TIMEOUT: Duration = Duration::from_secs(10);
+/// Images being made, each with the lock its maker holds, so byte-identical
+/// covers that arrive together wait for one worker job.
+static MAKING: std::sync::Mutex<BTreeMap<ImageKey, Arc<tokio::sync::Mutex<()>>>> =
+    std::sync::Mutex::new(BTreeMap::new());
 /// Live bodies have their own admission, independent of library metadata calls.
 const MAX_LISTEN_STREAMS: usize = 16;
 static LISTEN_STREAMS: Semaphore = Semaphore::const_new(MAX_LISTEN_STREAMS);
@@ -318,11 +332,20 @@ async fn admitted_call<T: Send + 'static, E: Send + 'static>(
     call: impl FnOnce() -> Result<T, E> + Send + 'static,
 ) -> Result<T, CallFailure<E>> {
     let permit = admission.try_acquire().map_err(|_| CallFailure::Busy)?;
-    let task = tokio::task::spawn_blocking(move || {
+    blocking_call(timeout, move || {
         let _permit = permit;
         call()
-    });
-    match tokio::time::timeout(timeout, task).await {
+    })
+    .await
+}
+
+/// Runs a blocking call; whatever `call` owns, an admission permit included,
+/// stays held until the call returns, also after its caller stopped waiting.
+async fn blocking_call<T: Send + 'static, E: Send + 'static>(
+    timeout: Duration,
+    call: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, CallFailure<E>> {
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(call)).await {
         Ok(Ok(result)) => result.map_err(CallFailure::Failed),
         Ok(Err(_)) => Err(CallFailure::Crashed),
         Err(_) => Err(CallFailure::TimedOut),
@@ -687,17 +710,9 @@ async fn art(
     let body = match cached {
         Some(body) => body,
         None => {
-            let (owned, id) = (bot.clone(), key.1.clone());
-            let image = async move {
-                ask(&owned, library, move |library| library.cover_art(&id, size))
-                    .await
-                    .map(|image| image.bytes)
-                    .map_err(|error| match error.0 {
-                        StatusCode::SERVICE_UNAVAILABLE => error,
-                        _ => ApiError(StatusCode::NOT_FOUND, error.1),
-                    })
-            };
-            fetch_cover(&bot, key, image).await?
+            let (libraries, id) = (bot.libraries.clone(), key.1.clone());
+            let image = move |fetch| library_image(libraries, library, id, size, fetch);
+            fetch_cover(&bot, key, image, worker_thumbnail).await?
         }
     };
     owner(&bot, &token)?;
@@ -716,16 +731,49 @@ async fn art(
         .into_response())
 }
 
-/// Fetches a cover that is not cached, has the content worker re-encode it,
-/// and caches it, even when the HTTP client has gone by then. `image` fetches
-/// the encoded cover; it runs only once a worker job is admitted. A request
-/// waits up to [`COVER_WAIT`] for a job, with at most [`MAX_COVER_WAITERS`]
-/// waiting; a cover another request finished meanwhile comes from the cache.
-async fn fetch_cover(
+/// A library's encoded cover; the call holds `fetch` until its transport is
+/// done. A busy library gives 503; other failures give 404.
+async fn library_image(
+    libraries: Arc<Vec<Library>>,
+    library: usize,
+    id: String,
+    size: u32,
+    fetch: SemaphorePermit<'static>,
+) -> Result<Vec<u8>, ApiError> {
+    blocking_call(LIBRARY_TIMEOUT, move || {
+        let _fetch = fetch;
+        libraries[library].cover_art(&id, size)
+    })
+    .await
+    .map(|image| image.bytes)
+    .map_err(|failure| match library_failure(failure) {
+        error if error.0 == StatusCode::SERVICE_UNAVAILABLE => error,
+        error => ApiError(StatusCode::NOT_FOUND, error.1),
+    })
+}
+
+/// Makes an uncached cover and caches it, even when the HTTP client
+/// has gone by then. With at most [`MAX_COVER_WAITERS`] requests on the way, a
+/// request waits up to [`COVER_WAIT`] for one of [`MAX_COVER_FETCHES`] fetch
+/// permits; a cover another request finished meanwhile comes from the cache,
+/// and otherwise `image` fetches the encoded cover, holding the permit until
+/// its transport is done. A PNG the worker already made from the same bytes
+/// at this size comes from memory. Otherwise the request waits for the image's
+/// turn, so identical images arriving together take one job, and then up to
+/// [`COVER_WAIT`] for one of [`MAX_COVER_JOBS`] jobs, in which `convert` makes
+/// the PNG.
+async fn fetch_cover<I, F, C, R>(
     bot: &Arc<Bot>,
     key: CoverKey,
-    image: impl Future<Output = Result<Vec<u8>, ApiError>> + Send + 'static,
-) -> Result<Bytes, ApiError> {
+    image: I,
+    convert: C,
+) -> Result<Bytes, ApiError>
+where
+    I: FnOnce(SemaphorePermit<'static>) -> F,
+    F: Future<Output = Result<Vec<u8>, ApiError>>,
+    C: FnOnce(Vec<u8>, u32) -> R + Send + 'static,
+    R: Future<Output = Result<Bytes, ApiError>> + Send + 'static,
+{
     let busy = || {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -733,50 +781,89 @@ async fn fetch_cover(
         )
     };
     let waiting = COVER_WAITERS.try_acquire().map_err(|_| busy())?;
-    let permit = tokio::time::timeout(COVER_WAIT, COVER_JOBS.acquire())
+    let fetch = tokio::time::timeout(COVER_WAIT, COVER_FETCHES.acquire())
+        .await
+        .map_err(|_| busy())?
+        .map_err(|_| busy())?;
+    if let Some(body) = bot.covers.get(&key).await {
+        return Ok(body);
+    }
+    let image = image(fetch).await?;
+    let made: ImageKey = (Sha256::digest(&image).into(), key.2);
+    if let Some(body) = bot.covers.made(&made) {
+        return Ok(keep(bot, key, body).await);
+    }
+    let turn = tokio::time::timeout(COVER_WAIT, image_turn(made))
+        .await
+        .map_err(|_| busy())?;
+    if let Some(body) = bot.covers.made(&made) {
+        return Ok(keep(bot, key, body).await);
+    }
+    let job = tokio::time::timeout(COVER_WAIT, COVER_JOBS.acquire())
         .await
         .map_err(|_| busy())?
         .map_err(|_| busy())?;
     drop(waiting);
-    if let Some(body) = bot.covers.get(&key).await {
-        return Ok(body);
-    }
-    let size = key.2;
-    let worker = content_worker_path(&std::env::current_exe().map_err(|_| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the artwork worker is unavailable".to_owned(),
-        )
-    })?)?;
     let owned = bot.clone();
     let task = tokio::spawn(async move {
-        let _permit = permit;
-        let image = image.await?;
-        if !worker.is_file() {
-            return Err(ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the artwork worker is unavailable".to_owned(),
-            ));
-        }
-        let thumbnail = nuschl_ipc::host::thumbnail(&worker, &image, size, size)
-            .await
-            .map_err(|_| {
-                ApiError(
-                    StatusCode::NOT_FOUND,
-                    "the cover image is invalid or unavailable".to_owned(),
-                )
-            })?;
-        let body = Bytes::from(thumbnail.png);
+        let (_turn, _job) = (turn, job);
+        let body = convert(image, made.1).await?;
+        owned.covers.remember(made, body.clone());
         owned.covers.insert(&key, &body).await;
         Ok::<_, ApiError>(body)
     });
-    match tokio::time::timeout(LIBRARY_TIMEOUT + Duration::from_secs(10), task).await {
+    match tokio::time::timeout(COVER_JOB_TIMEOUT, task).await {
         Ok(Ok(result)) => result,
         _ => Err(ApiError(
             StatusCode::GATEWAY_TIMEOUT,
             "the artwork worker did not finish in time".to_owned(),
         )),
     }
+}
+
+/// The right to make the PNG for `image`; its holder is the only request
+/// making it. Entries nobody holds or waits for leave the map here.
+async fn image_turn(image: ImageKey) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut making = MAKING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        making.retain(|_, lock| Arc::strong_count(lock) > 1);
+        making.entry(image).or_default().clone()
+    };
+    lock.lock_owned().await
+}
+
+/// Caches a PNG made for another key under `key` as well, even when the HTTP
+/// client has gone by then.
+async fn keep(bot: &Arc<Bot>, key: CoverKey, body: Bytes) -> Bytes {
+    let (owned, kept) = (bot.clone(), body.clone());
+    let _ = tokio::spawn(async move { owned.covers.insert(&key, &kept).await }).await;
+    body
+}
+
+/// Has the confined content worker re-encode `image` as a PNG of at most
+/// `size` pixels per edge.
+async fn worker_thumbnail(image: Vec<u8>, size: u32) -> Result<Bytes, ApiError> {
+    let unavailable = || {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the artwork worker is unavailable".to_owned(),
+        )
+    };
+    let worker = content_worker_path(&std::env::current_exe().map_err(|_| unavailable())?)?;
+    if !worker.is_file() {
+        return Err(unavailable());
+    }
+    nuschl_ipc::host::thumbnail(&worker, &image, size, size)
+        .await
+        .map(|thumbnail| Bytes::from(thumbnail.png))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "the cover image is invalid or unavailable".to_owned(),
+            )
+        })
 }
 
 #[derive(Serialize)]
@@ -2192,13 +2279,14 @@ async fn import_art(
         Some(body) => body,
         None => {
             // The cache is shared, so the bot asks: no viewer's lookups are spent.
-            let image = async move {
+            let image = move |fetch: SemaphorePermit<'static>| async move {
                 import_call(&adding, move |client| {
+                    let _fetch = fetch;
                     client.cover(import::BOT_REQUESTER, &id)
                 })
                 .await
             };
-            fetch_cover(&bot, key, image).await?
+            fetch_cover(&bot, key, image, worker_thumbnail).await?
         }
     };
     owner(&bot, &token)?;
@@ -3174,8 +3262,9 @@ mod tests {
             .acquire_many(MAX_LIBRARY_CALLS as u32)
             .await
             .unwrap();
+        // Covers have their own fetch admission and still reach the library.
         let response = tokio::time::timeout(
-            Duration::from_millis(200),
+            Duration::from_secs(5),
             art(
                 State(bot.clone()),
                 Path((token.clone(), 0, "cover".into())),
@@ -3187,10 +3276,10 @@ mod tests {
         .err()
         .unwrap()
         .into_response();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             response_json(response).await["error"],
-            "the music library is busy"
+            "the music library sent a non-image response"
         );
         let response = tokio::time::timeout(
             Duration::from_millis(200),
@@ -3229,7 +3318,11 @@ mod tests {
         bot.covers
             .insert(&(art_key.clone(), "cover".into(), 300), &body)
             .await;
-        // A hit needs no artwork job.
+        // A hit needs no fetch and no artwork job.
+        let fetches = COVER_FETCHES
+            .acquire_many(MAX_COVER_FETCHES as u32)
+            .await
+            .unwrap();
         let jobs = COVER_JOBS
             .acquire_many(MAX_COVER_JOBS as u32)
             .await
@@ -3273,7 +3366,7 @@ mod tests {
         let refused = other(bot.clone(), token.clone()).await.err().unwrap();
         assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
         drop(full);
-        // A miss waits for a job; a cover finished meanwhile comes from the
+        // A miss waits for a fetch; a cover finished meanwhile comes from the
         // cache, and the library is not asked.
         let waiting = tokio::spawn(other(bot.clone(), token.clone()));
         while COVER_WAITERS.available_permits() == MAX_COVER_WAITERS {
@@ -3282,16 +3375,16 @@ mod tests {
         bot.covers
             .insert(&(art_key.clone(), "other".into(), 300), &body)
             .await;
-        drop(jobs);
+        drop((fetches, jobs));
         let response = waiting.await.unwrap().ok().unwrap();
         let served = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         assert_eq!(served, body);
         assert_eq!(COVER_WAITERS.available_permits(), MAX_COVER_WAITERS);
-        // A miss that finds no job within the wait is refused.
-        let jobs = COVER_JOBS
-            .acquire_many(MAX_COVER_JOBS as u32)
+        // A miss that finds no fetch within the wait is refused.
+        let fetches = COVER_FETCHES
+            .acquire_many(MAX_COVER_FETCHES as u32)
             .await
             .unwrap();
         tokio::time::pause();
@@ -3306,8 +3399,138 @@ mod tests {
         .unwrap();
         assert_eq!(late.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(started.elapsed() >= COVER_WAIT);
-        drop(jobs);
+        drop(fetches);
         assert!(server.requests().is_empty());
+    }
+
+    /// A 1×1 thumbnail PNG, standing in for what the content worker makes.
+    const PNG: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x38\x11\xa0\xf1\x1f\x00\x05\x64\x02\x40\x64\x52\x9c\x3a\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+
+    type Runs = Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+    /// A content worker stand-in that records the images it gets and makes [`PNG`].
+    fn recorded(
+        runs: &Runs,
+    ) -> impl FnOnce(Vec<u8>, u32) -> std::future::Ready<Result<Bytes, ApiError>> + Send + 'static
+    {
+        let runs = runs.clone();
+        move |image, _| {
+            runs.lock().unwrap().push(image);
+            std::future::ready(Ok(Bytes::from_static(PNG)))
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_identical_cover_images_take_one_worker_job() {
+        let _exclusive = API_TESTS.lock().await;
+        let server = Server::new(|request, socket| {
+            use std::io::Write;
+            let body: &[u8] = if request.contains("id=mf-other") {
+                b"other image"
+            } else {
+                b"album image"
+            };
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(body).unwrap();
+        });
+        let (_directory, bot, _token) = test_bot(&server.url, 1);
+        let library = bot.libraries[0].key().to_owned();
+        let runs = Runs::default();
+        let cover = |id: String, size: u32| {
+            let (bot, convert) = (bot.clone(), recorded(&runs));
+            let key: CoverKey = (library.clone(), id.clone(), size);
+            async move {
+                let libraries = bot.libraries.clone();
+                let image = move |fetch| library_image(libraries, 0, id, size, fetch);
+                fetch_cover(&bot, key, image, convert).await.ok().unwrap()
+            }
+        };
+        // Twelve songs of one album arrive together, and the library answers
+        // each with the album's image.
+        let songs: Vec<_> = (0..12)
+            .map(|index| tokio::spawn(cover(format!("mf-{index}_0"), 300)))
+            .collect();
+        for song in songs {
+            assert_eq!(song.await.unwrap(), PNG);
+        }
+        assert_eq!(*runs.lock().unwrap(), [b"album image".to_vec()]);
+        assert_eq!(server.requests().len(), 12);
+        for index in 0..12 {
+            let key = (library.clone(), format!("mf-{index}_0"), 300);
+            assert_eq!(bot.covers.get(&key).await.as_deref(), Some(PNG));
+        }
+        // The album's own cover comes from memory.
+        assert_eq!(cover("al-1_0".into(), 300).await, PNG);
+        assert_eq!(runs.lock().unwrap().len(), 1);
+        // Other bytes, and the same bytes at another size, take their own run.
+        assert_eq!(cover("mf-other".into(), 300).await, PNG);
+        assert_eq!(cover("mf-0_0".into(), 64).await, PNG);
+        assert_eq!(
+            *runs.lock().unwrap(),
+            [
+                b"album image".to_vec(),
+                b"other image".to_vec(),
+                b"album image".to_vec()
+            ]
+        );
+        assert_eq!(server.requests().len(), 15);
+        assert_eq!(COVER_WAITERS.available_permits(), MAX_COVER_WAITERS);
+        assert_eq!(COVER_FETCHES.available_permits(), MAX_COVER_FETCHES);
+        assert_eq!(COVER_JOBS.available_permits(), MAX_COVER_JOBS);
+    }
+
+    #[tokio::test]
+    async fn a_cover_waiting_behind_its_image_takes_the_png_and_jobs_have_a_wait_limit() {
+        let _exclusive = API_TESTS.lock().await;
+        let (_directory, bot, _token) = test_bot("http://unused.invalid", 1);
+        let runs = Runs::default();
+        let cover = |id: &str, image: &'static [u8]| {
+            let (bot, convert) = (bot.clone(), recorded(&runs));
+            let key: CoverKey = ("k".into(), id.into(), 300);
+            async move {
+                let image = move |_fetch| std::future::ready(Ok(image.to_vec()));
+                fetch_cover(&bot, key, image, convert).await
+            }
+        };
+        // With both jobs taken, the first song waits for a job and holds its
+        // image's turn; the second, with the same image, waits behind it.
+        let jobs = COVER_JOBS
+            .acquire_many(MAX_COVER_JOBS as u32)
+            .await
+            .unwrap();
+        let shared: ImageKey = (Sha256::digest(b"shared image").into(), 300);
+        let first = tokio::spawn(cover("first", b"shared image"));
+        let second = tokio::spawn(cover("second", b"shared image"));
+        // The map's reference, the first's guard and the second's wait.
+        while MAKING
+            .lock()
+            .unwrap()
+            .get(&shared)
+            .map_or(0, Arc::strong_count)
+            < 3
+        {
+            tokio::task::yield_now().await;
+        }
+        drop(jobs);
+        assert_eq!(first.await.unwrap().ok().unwrap(), PNG);
+        assert_eq!(second.await.unwrap().ok().unwrap(), PNG);
+        assert_eq!(*runs.lock().unwrap(), [b"shared image".to_vec()]);
+        let key = ("k".into(), "second".into(), 300);
+        assert_eq!(bot.covers.get(&key).await.as_deref(), Some(PNG));
+
+        // A miss that finds no job within the wait is refused.
+        let jobs = COVER_JOBS
+            .acquire_many(MAX_COVER_JOBS as u32)
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let late = cover("late", b"late image").await.err().unwrap();
+        assert_eq!(late.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(started.elapsed() >= COVER_WAIT);
+        drop(jobs);
+        assert_eq!(runs.lock().unwrap().len(), 1);
+        assert_eq!(COVER_WAITERS.available_permits(), MAX_COVER_WAITERS);
     }
 
     #[tokio::test]
