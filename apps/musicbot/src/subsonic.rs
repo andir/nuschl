@@ -27,6 +27,11 @@ pub const MAX_LYRIC_LINE_CHARS: usize = 500;
 pub const SONIC_SIMILAR_COUNT: usize = 25;
 /// The most songs asked for and kept from `findSonicPath`, both ends included.
 pub const SONIC_PATH_COUNT: usize = 25;
+/// The longest genre name, in characters, the bot asks a library for; genre
+/// lists hold the genres with names of 1 to this many characters.
+pub const MAX_GENRE_NAME: usize = 200;
+/// The most genres one genre list holds: the first ones by name.
+pub const MAX_GENRES: usize = 2000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -125,6 +130,22 @@ pub struct Playlist {
     pub duration: Option<u32>,
     pub owner: Option<String>,
     pub cover_art: Option<String>,
+}
+
+/// A genre of a library. The counts are `None` when the server gives no usable number.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Genre {
+    pub name: String,
+    pub albums: Option<u32>,
+    pub songs: Option<u32>,
+}
+
+/// A library's genres by name, at most [`MAX_GENRES`].
+#[derive(Debug, Serialize)]
+pub struct Genres {
+    pub genres: Vec<Genre>,
+    /// The library has more genres than the list holds.
+    pub truncated: bool,
 }
 
 /// The album lists of `getAlbumList2` the web page offers.
@@ -634,17 +655,84 @@ impl Library {
     }
 
     pub fn album_list(&self, list: AlbumList, size: u32, offset: u32) -> Result<Vec<Album>, Error> {
-        let reply = self.call(
+        self.album_page(
+            self.get("getAlbumList2").query("type", list.name()),
+            size,
+            offset,
+        )
+    }
+
+    /// One page of a genre's albums.
+    pub fn genre_albums(&self, genre: &str, size: u32, offset: u32) -> Result<Vec<Album>, Error> {
+        self.album_page(
             self.get("getAlbumList2")
-                .query("type", list.name())
+                .query("type", "byGenre")
+                .query("genre", genre),
+            size,
+            offset,
+        )
+    }
+
+    /// At most `size` albums of a `getAlbumList2` request, from `offset` on.
+    fn album_page(
+        &self,
+        request: ureq::RequestBuilder<ureq::typestate::WithoutBody>,
+        size: u32,
+        offset: u32,
+    ) -> Result<Vec<Album>, Error> {
+        let reply = self.call(
+            request
                 .query("size", size.to_string())
                 .query("offset", offset.to_string()),
         )?;
         let albums = reply.album_list2.map(|list| list.album).unwrap_or_default();
         Ok(albums
             .into_iter()
+            .take(size as usize)
             .map(|album| album.album(self.index))
             .collect())
+    }
+
+    /// One page of a genre's songs: at most `count`, from `offset` on.
+    pub fn genre_songs(&self, genre: &str, count: u32, offset: u32) -> Result<Vec<Track>, Error> {
+        let reply = self.call(
+            self.get("getSongsByGenre")
+                .query("genre", genre)
+                .query("count", count.to_string())
+                .query("offset", offset.to_string()),
+        )?;
+        let songs = reply
+            .songs_by_genre
+            .map(|list| list.song)
+            .unwrap_or_default();
+        Ok(songs
+            .into_iter()
+            .take(count as usize)
+            .map(|song| song.track(self.index))
+            .collect())
+    }
+
+    /// The library's genres sorted by name, ignoring case, at most
+    /// [`MAX_GENRES`], each name once. The list holds the genres with names
+    /// of 1 to [`MAX_GENRE_NAME`] characters, the names the bot asks for.
+    pub fn genres(&self) -> Result<Genres, Error> {
+        let reply = self.call(self.get("getGenres"))?;
+        let mut genres: Vec<Genre> = reply
+            .genres
+            .map(|list| list.genre)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(GenreEntry::genre)
+            .collect();
+        genres.sort_unstable_by(|a, b| {
+            let a_folded = a.name.chars().flat_map(char::to_lowercase);
+            let b_folded = b.name.chars().flat_map(char::to_lowercase);
+            a_folded.cmp(b_folded).then_with(|| a.name.cmp(&b.name))
+        });
+        genres.dedup_by(|a, b| a.name == b.name);
+        let truncated = genres.len() > MAX_GENRES;
+        genres.truncate(MAX_GENRES);
+        Ok(Genres { genres, truncated })
     }
 
     pub fn playlists(&self) -> Result<Vec<Playlist>, Error> {
@@ -1010,6 +1098,8 @@ struct Reply {
     album_list2: Option<AlbumList2>,
     playlists: Option<Playlists>,
     playlist: Option<PlaylistWithSongs>,
+    genres: Option<GenreList>,
+    songs_by_genre: Option<SongsByGenre>,
     #[serde(default)]
     open_subsonic_extensions: Vec<Extension>,
     transcode_decision: Option<TranscodeDecision>,
@@ -1370,6 +1460,78 @@ struct AlbumList2 {
 struct Playlists {
     #[serde(default)]
     playlist: Vec<PlaylistEntry>,
+}
+
+#[derive(Deserialize)]
+struct GenreList {
+    #[serde(default)]
+    genre: Vec<GenreEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenreEntry {
+    #[serde(default, deserialize_with = "lenient")]
+    value: Option<Scalar>,
+    #[serde(default, deserialize_with = "lenient")]
+    album_count: Option<Scalar>,
+    #[serde(default, deserialize_with = "lenient")]
+    song_count: Option<Scalar>,
+}
+
+impl GenreEntry {
+    /// The genre, when its name has 1 to [`MAX_GENRE_NAME`] characters.
+    fn genre(self) -> Option<Genre> {
+        let name = match self.value? {
+            Scalar::Text(text) => text,
+            Scalar::Number(number) => number.to_string(),
+        };
+        (!name.is_empty() && name.chars().count() <= MAX_GENRE_NAME).then(|| Genre {
+            name,
+            albums: self.album_count.and_then(Scalar::count),
+            songs: self.song_count.and_then(Scalar::count),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct SongsByGenre {
+    #[serde(default)]
+    song: Vec<Song>,
+}
+
+/// A text or whole-number value of a field servers fill in different ways.
+enum Scalar {
+    Text(String),
+    Number(u64),
+}
+
+impl Scalar {
+    /// A count from a number or a number in text; larger counts read as `u32::MAX`.
+    fn count(self) -> Option<u32> {
+        let number = match self {
+            Self::Number(number) => number,
+            Self::Text(text) => text.trim().parse().ok()?,
+        };
+        Some(u32::try_from(number).unwrap_or(u32::MAX))
+    }
+}
+
+/// Reads text or a whole number; every other value, such as a negative or
+/// fractional number, a list or `null`, reads as `None`.
+fn lenient<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Scalar>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Any {
+        Text(String),
+        Number(u64),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Any::deserialize(deserializer)? {
+        Any::Text(text) => Some(Scalar::Text(text)),
+        Any::Number(number) => Some(Scalar::Number(number)),
+        Any::Other(_) => None,
+    })
 }
 
 #[derive(Deserialize)]

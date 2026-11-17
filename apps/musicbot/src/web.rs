@@ -10,8 +10,8 @@ use crate::{
     import,
     player::{BrowserSubscription, Ducking, MAX_DUCK_HOLD},
     subsonic::{
-        self, Album, AlbumList, Artist, Library, LibraryIdentity, Lyrics, SongDetails, SonicMatch,
-        Track,
+        self, Album, AlbumList, Artist, Genres, Library, LibraryIdentity, Lyrics, MAX_GENRE_NAME,
+        SongDetails, SonicMatch, Track,
     },
     tokens::Owner,
 };
@@ -70,6 +70,10 @@ const LISTEN_KEEPALIVE: Duration = Duration::from_secs(15);
 const KEEPALIVE_RECORD: &[u8] = &[2];
 /// Albums per page of an album list.
 const PAGE_SIZE: u32 = 48;
+/// Songs per page of a genre's songs.
+const GENRE_SONGS_PAGE: u32 = 50;
+/// The last page number a paged list asks for.
+const MAX_PAGE: u32 = 10_000;
 /// Changes that come in a burst are sent as one state.
 const COALESCE: Duration = Duration::from_millis(50);
 const INVALID_LINK: &str =
@@ -98,6 +102,9 @@ pub fn router(bot: Arc<Bot>) -> Router {
         .route("/u/{token}/api/album", get(album))
         .route("/u/{token}/api/artists", get(artists))
         .route("/u/{token}/api/artist", get(artist))
+        .route("/u/{token}/api/genres", get(genres))
+        .route("/u/{token}/api/genre/albums", get(genre_albums))
+        .route("/u/{token}/api/genre/songs", get(genre_songs))
         .route("/u/{token}/api/playlists", get(playlists::list))
         .route("/u/{token}/api/playlist", get(playlists::detail))
         .route("/u/{token}/api/playlists/create", post(playlists::create))
@@ -1255,6 +1262,8 @@ enum Kind {
     Similar,
     /// The songs leading from `id` to `to` by sound.
     Path,
+    /// One page of a genre's songs: `id` is the genre's name, `page` the page.
+    Genre,
 }
 
 #[derive(Deserialize)]
@@ -1301,6 +1310,8 @@ enum Command {
         id: String,
         /// The song a `path` ends with.
         to: Option<String>,
+        /// The page of a `genre`'s songs, from 0.
+        page: Option<u32>,
         index: Option<usize>,
     },
     Attach {
@@ -1359,6 +1370,7 @@ async fn command(
             library,
             id,
             to,
+            page,
             index,
             ..
         } => {
@@ -1366,6 +1378,11 @@ async fn command(
                 Kind::Path => to.ok_or_else(|| bad("a sonic path needs the song it ends with"))?,
                 _ => String::new(),
             };
+            let id = match kind {
+                Kind::Genre => genre_name(id)?,
+                _ => id,
+            };
+            let offset = page.unwrap_or(0).min(MAX_PAGE) * GENRE_SONGS_PAGE;
             let sonic = |matches: Vec<SonicMatch>| -> Vec<Track> {
                 matches.into_iter().map(|found| found.track).collect()
             };
@@ -1378,6 +1395,7 @@ async fn command(
                     Ok(sonic(distinct_similar(matches, &library.song(&id)?)))
                 }
                 Kind::Path => library.sonic_path(&id, &to).map(sonic),
+                Kind::Genre => library.genre_songs(&id, GENRE_SONGS_PAGE, offset),
             })
             .await?;
             let tracks = match kind {
@@ -1548,7 +1566,7 @@ async fn albums(
 ) -> Result<Json<AlbumPage>, ApiError> {
     owner(&bot, &token)?;
     let list = AlbumList::parse(&query.list).unwrap_or(AlbumList::Newest);
-    let page = query.page.min(10_000);
+    let page = query.page.min(MAX_PAGE);
     let albums = ask(&bot, query.library, move |library| {
         library.album_list(list, PAGE_SIZE, page * PAGE_SIZE)
     })
@@ -1572,6 +1590,81 @@ async fn album(
     owner(&bot, &token)?;
     let (album, songs) = ask(&bot, query.library, move |library| library.album(&query.id)).await?;
     Ok(Json(AlbumView { album, songs }))
+}
+
+#[derive(Deserialize)]
+struct GenreQuery {
+    #[serde(default)]
+    library: usize,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    page: u32,
+}
+
+/// A genre name the bot asks a library for: 1 to [`MAX_GENRE_NAME`] characters.
+fn genre_name(name: String) -> Result<String, ApiError> {
+    if name.is_empty() {
+        Err(bad("a genre needs a name"))
+    } else if name.chars().count() > MAX_GENRE_NAME {
+        Err(bad(format!(
+            "genre names have at most {MAX_GENRE_NAME} characters"
+        )))
+    } else {
+        Ok(name)
+    }
+}
+
+/// The library's genres by name with their album and song counts.
+async fn genres(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<LibraryQuery>,
+) -> Result<Json<Genres>, ApiError> {
+    owner(&bot, &token)?;
+    Ok(Json(
+        ask(&bot, query.library, |library| library.genres()).await?,
+    ))
+}
+
+/// One page of a genre's albums, [`PAGE_SIZE`] at a time.
+async fn genre_albums(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<GenreQuery>,
+) -> Result<Json<AlbumPage>, ApiError> {
+    owner(&bot, &token)?;
+    let name = genre_name(query.name)?;
+    let page = query.page.min(MAX_PAGE);
+    let albums = ask(&bot, query.library, move |library| {
+        library.genre_albums(&name, PAGE_SIZE, page * PAGE_SIZE)
+    })
+    .await?;
+    let more = albums.len() as u32 == PAGE_SIZE;
+    Ok(Json(AlbumPage { albums, more }))
+}
+
+#[derive(Serialize)]
+struct SongPage {
+    songs: Vec<Track>,
+    more: bool,
+}
+
+/// One page of a genre's songs, [`GENRE_SONGS_PAGE`] at a time.
+async fn genre_songs(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<GenreQuery>,
+) -> Result<Json<SongPage>, ApiError> {
+    owner(&bot, &token)?;
+    let name = genre_name(query.name)?;
+    let page = query.page.min(MAX_PAGE);
+    let songs = ask(&bot, query.library, move |library| {
+        library.genre_songs(&name, GENRE_SONGS_PAGE, page * GENRE_SONGS_PAGE)
+    })
+    .await?;
+    let more = songs.len() as u32 == GENRE_SONGS_PAGE;
+    Ok(Json(SongPage { songs, more }))
 }
 
 #[derive(Serialize)]
@@ -3769,6 +3862,7 @@ mod tests {
             library: 1,
             id: "s1".into(),
             to: to.map(str::to_owned),
+            page: None,
             index: None,
         };
         let asked = server.requests().len();
@@ -4072,6 +4166,260 @@ mod tests {
             (refused.0, refused.1.as_str()),
             (StatusCode::SERVICE_UNAVAILABLE, "the music library is busy")
         );
+        assert_eq!(server.requests().len(), asked);
+        drop(occupied);
+    }
+
+    /// The decoded query parameters of a fixture request.
+    fn request_parameters(request: &str) -> std::collections::HashMap<String, String> {
+        let target: axum::http::Uri = request.split(' ').nth(1).unwrap().parse().unwrap();
+        Query::try_from_uri(&target).unwrap().0
+    }
+
+    fn fixture_json(socket: &mut std::net::TcpStream, body: &serde_json::Value) {
+        use std::io::Write;
+        let body = serde_json::to_vec(body).unwrap();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        socket.write_all(&body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn genres_come_by_name_with_lenient_counts_and_bounded() {
+        let _exclusive = API_TESTS.lock().await;
+        let long = "x".repeat(MAX_GENRE_NAME + 1);
+        let server = Server::new(move |request, socket| {
+            assert!(request.starts_with("GET /rest/getGenres?"), "{request}");
+            fixture_json(
+                socket,
+                &serde_json::json!({"subsonic-response": {"status": "ok", "genres": {"genre": [
+                    {"value": "rock", "songCount": 12, "albumCount": 2},
+                    {"value": "Ambient", "songCount": "7", "albumCount": " 1 "},
+                    {"value": "Jazz; Fusion", "songCount": -3, "albumCount": 2.5},
+                    {"value": 1990, "songCount": null},
+                    {"value": "Ambient", "songCount": 7, "albumCount": 1},
+                    {"value": "", "songCount": 1},
+                    {"value": long, "songCount": 1},
+                    {"value": true, "songCount": 1},
+                    {"songCount": 1},
+                    {"value": "Électro", "songCount": 99_999_999_999u64, "albumCount": "many"},
+                ]}}}),
+            );
+        });
+        let (_directory, bot, token) = test_bot(&server.url, 1);
+        let list = genres(
+            State(bot.clone()),
+            Path(token.clone()),
+            Query(LibraryQuery { library: 0 }),
+        )
+        .await
+        .ok()
+        .unwrap()
+        .0;
+        assert_eq!(
+            serde_json::to_value(&list).unwrap(),
+            serde_json::json!({"genres": [
+                {"name": "1990", "albums": null, "songs": null},
+                {"name": "Ambient", "albums": 1, "songs": 7},
+                {"name": "Jazz; Fusion", "albums": null, "songs": null},
+                {"name": "rock", "albums": 2, "songs": 12},
+                {"name": "Électro", "albums": null, "songs": u32::MAX},
+            ], "truncated": false})
+        );
+
+        let many = Server::new(|_, socket| {
+            let genre: Vec<_> = (0..subsonic::MAX_GENRES + 100)
+                .rev()
+                .map(|n| serde_json::json!({"value": format!("g{n:05}"), "songCount": n}))
+                .collect();
+            fixture_json(
+                socket,
+                &serde_json::json!({"subsonic-response": {"status": "ok", "genres": {"genre": genre}}}),
+            );
+        });
+        let (_many_directory, bot, token) = test_bot(&many.url, 1);
+        let list = genres(State(bot), Path(token), Query(LibraryQuery { library: 0 }))
+            .await
+            .ok()
+            .unwrap()
+            .0;
+        assert!(list.truncated);
+        assert_eq!(list.genres.len(), subsonic::MAX_GENRES);
+        assert_eq!(list.genres[0].name, "g00000");
+        assert_eq!(list.genres.last().unwrap().name, "g01999");
+    }
+
+    #[tokio::test]
+    async fn genre_pages_ask_by_name_and_page_and_keep_odd_names() {
+        let _exclusive = API_TESTS.lock().await;
+        // Full pages from offset 0, a short page after it, and more songs
+        // than asked for, as a server may send.
+        let server = Server::new(|request, socket| {
+            let parameters = request_parameters(request);
+            let genre = &parameters["genre"];
+            let offset: usize = parameters["offset"].parse().unwrap();
+            let body = if request.starts_with("GET /rest/getAlbumList2?") {
+                assert_eq!(parameters["type"], "byGenre");
+                let size: usize = parameters["size"].parse().unwrap();
+                let count = if offset == 0 { size } else { 3 };
+                let album: Vec<_> = (offset..offset + count)
+                    .map(|n| serde_json::json!({"id": format!("al{n}"), "name": format!("{genre} #{n}")}))
+                    .collect();
+                serde_json::json!({"subsonic-response": {"status": "ok", "albumList2": {"album": album}}})
+            } else {
+                assert!(
+                    request.starts_with("GET /rest/getSongsByGenre?"),
+                    "{request}"
+                );
+                let count: usize = parameters["count"].parse().unwrap();
+                let song: Vec<_> = (offset..offset + count + 10)
+                    .map(|n| serde_json::json!({"id": format!("s{n}"), "title": genre}))
+                    .collect();
+                serde_json::json!({"subsonic-response": {"status": "ok", "songsByGenre": {"song": song}}})
+            };
+            fixture_json(socket, &body);
+        });
+        let (_directory, mut bot, token) = test_bot(&server.url, 1);
+        let unique = Arc::get_mut(&mut bot).unwrap();
+        unique.players.push(Arc::new(crate::player::Player::new(
+            "Queue".into(),
+            50,
+            Ducking::default(),
+            unique.changes.clone(),
+        )));
+        let query = |name: &str, page| {
+            Query(GenreQuery {
+                library: 0,
+                name: name.to_owned(),
+                page,
+            })
+        };
+        let longest = "é".repeat(MAX_GENRE_NAME);
+        for name in [
+            "Rock; Pop",
+            "R&B",
+            "AC/DC Covers",
+            "Drum + Bass",
+            "a=b?c#d%20",
+            "Música Popular Brasileira 日本",
+            longest.as_str(),
+        ] {
+            let first = genre_albums(State(bot.clone()), Path(token.clone()), query(name, 0))
+                .await
+                .ok()
+                .unwrap()
+                .0;
+            assert_eq!(first.albums.len(), PAGE_SIZE as usize);
+            assert_eq!(first.albums[0].name, format!("{name} #0"));
+            assert!(first.more);
+            let second = genre_albums(State(bot.clone()), Path(token.clone()), query(name, 1))
+                .await
+                .ok()
+                .unwrap()
+                .0;
+            assert_eq!(second.albums[0].name, format!("{name} #48"));
+            assert!(!second.more);
+            let songs = genre_songs(State(bot.clone()), Path(token.clone()), query(name, 2))
+                .await
+                .ok()
+                .unwrap()
+                .0;
+            assert_eq!(songs.songs.len(), GENRE_SONGS_PAGE as usize);
+            assert_eq!(songs.songs[0].id, "s100");
+            assert_eq!(songs.songs[0].title, name);
+            assert!(songs.more);
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 21);
+        assert!(requests[0].contains("&size=48&offset=0"), "{}", requests[0]);
+        assert!(
+            requests[1].contains("&size=48&offset=48"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[2].contains("&count=50&offset=100"),
+            "{}",
+            requests[2]
+        );
+        assert!(
+            requests[0].contains("&genre=Rock%3B%20Pop&"),
+            "{}",
+            requests[0]
+        );
+
+        // Adding a genre queues one page of its songs.
+        let add: Command = serde_json::from_str(
+            r#"{"command":"add","player":0,"kind":"genre","library":0,"id":"R&B","page":1}"#,
+        )
+        .unwrap();
+        command(State(bot.clone()), Path(token.clone()), Json(add))
+            .await
+            .ok()
+            .unwrap();
+        let queued = queue_ids(&bot);
+        assert_eq!(queued.len(), GENRE_SONGS_PAGE as usize);
+        assert_eq!((queued[0].as_str(), queued[49].as_str()), ("s50", "s99"));
+        assert!(server.requests()[21].contains("&genre=R%26B&count=50&offset=50"));
+
+        // Names the bot never asks for are refused before the library.
+        let too_long = "é".repeat(MAX_GENRE_NAME + 1);
+        let asked = server.requests().len();
+        for name in ["", too_long.as_str()] {
+            let refused = genre_albums(State(bot.clone()), Path(token.clone()), query(name, 0))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            let refused = genre_songs(State(bot.clone()), Path(token.clone()), query(name, 0))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            let add = Command::Add {
+                player: 0,
+                kind: Kind::Genre,
+                library: 0,
+                id: name.to_owned(),
+                to: None,
+                page: None,
+                index: None,
+            };
+            let refused = command(State(bot.clone()), Path(token.clone()), Json(add))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(server.requests().len(), asked);
+
+        let occupied = LIBRARY_CALLS
+            .acquire_many(MAX_LIBRARY_CALLS as u32)
+            .await
+            .unwrap();
+        let busy = [
+            genres(
+                State(bot.clone()),
+                Path(token.clone()),
+                Query(LibraryQuery { library: 0 }),
+            )
+            .await
+            .err()
+            .unwrap(),
+            genre_albums(State(bot.clone()), Path(token.clone()), query("R&B", 0))
+                .await
+                .err()
+                .unwrap(),
+            genre_songs(State(bot.clone()), Path(token.clone()), query("R&B", 0))
+                .await
+                .err()
+                .unwrap(),
+        ];
+        for refused in busy {
+            assert_eq!(
+                (refused.0, refused.1.as_str()),
+                (StatusCode::SERVICE_UNAVAILABLE, "the music library is busy")
+            );
+        }
         assert_eq!(server.requests().len(), asked);
         drop(occupied);
     }
