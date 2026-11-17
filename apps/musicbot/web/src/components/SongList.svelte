@@ -14,14 +14,14 @@
   const sonic = (song) => current && store.supportsSonic(song.library) && store.browseItemCurrent({ library: song.library, namespace });
 </script>
 
-<ol class="song-list" aria-label="Tracks">
+<ol class="rows card" aria-label="Tracks">
   {#each songs as song, i (`${song.library}:${song.id}:${i}`)}
     <li draggable={current} ondragstart={(event) => startItemDrag(event, "song", song.library, song.id, song.title, namespace)}>
-      <span class="number">{song.track ?? i + 1}</span>
-      {#if covers}<Cover library={song.library} art={song.cover_art} size={96} px={42} />{/if}
-      <div class="description">
-        <div class="title" title={song.title}><a href={buildRoute({ view: "song", library: song.library, id: song.id, namespace })} draggable="false">{song.title}</a></div>
-        <div class="secondary muted">
+      <span class="row-number">{song.track ?? i + 1}</span>
+      {#if covers}<Cover library={song.library} art={song.cover_art} size={96} px={44} />{/if}
+      <div class="row-text">
+        <div class="row-title" title={song.title}><a href={buildRoute({ view: "song", library: song.library, id: song.id, namespace })} draggable="false">{song.title}</a></div>
+        <div class="row-sub">
           {#if song.artist_id}<a href={buildRoute({ view: "artist", library: song.library, id: song.artist_id, namespace })}>{song.artist || "Unknown artist"}</a>
           {:else if song.artist}<span>{song.artist}</span>{/if}
           {#if covers && song.album}
@@ -34,7 +34,7 @@
         {@const percent = similarityPercent(similarities[i])}
         {#if percent !== null}<span class="similarity muted" title="Sonic similarity">{percent}%<span class="visually-hidden"> similar</span></span>{/if}
       {/if}
-      <span class="duration muted">{formatDuration(song.duration)}</span>
+      <span class="row-duration">{formatDuration(song.duration)}</span>
       <div class="actions" class:sonic={sonic(song)}>
         {#if sonic(song)}
           {@const from = sonicPathStart(playing, song)}
@@ -52,18 +52,8 @@
 </ol>
 
 <style>
-  .song-list { list-style: none; padding: 0; margin: 0; }
-  li { display: flex; align-items: center; gap: 0.65rem; min-height: 3.6rem; padding: 0.4rem; border-bottom: 1px solid var(--border); cursor: grab; border-radius: 4px; }
-  li:hover, li:focus-within { background: var(--surface-2); }
-  .number { flex: none; width: 2rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
-  .description { flex: 1; min-width: 0; }
-  .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .secondary { display: flex; gap: 0.6rem; font-size: 0.8rem; }
-  .secondary > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .duration { font-variant-numeric: tabular-nums; font-size: 0.85rem; }
-  .similarity { flex: none; font-variant-numeric: tabular-nums; font-size: 0.8rem; }
-  .actions { display: flex; }
-  .actions a.icon-btn { color: inherit; }
-  .actions a.icon-btn:hover { color: var(--accent); }
-  @media (max-width: 480px) { .number { display: none; } li { gap: 0.4rem; } .duration { display: none; } .actions.sonic { flex-wrap: wrap; justify-content: flex-end; max-width: 8.5rem; } }
+  li { cursor: grab; }
+  .similarity { flex: none; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  .actions { display: flex; align-items: center; }
+  @media (max-width: 480px) { .row-number, .row-duration { display: none; } .actions.sonic { flex-wrap: wrap; justify-content: flex-end; max-width: 8.5rem; } }
 </style>

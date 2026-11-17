@@ -83,7 +83,7 @@
           </select>
         </label>
       {/if}
-      <button class="btn share" disabled={link === null} aria-label="Copy link to this page" aria-describedby={shareProblem === null ? undefined : "share-problem"} title={shareProblem === null ? "Copy a link for people who have their own link to this bot" : undefined} onclick={copyLink}><Icon name="link" size={18} /> Copy link</button>
+      <button class="btn" disabled={link === null} aria-label="Copy link to this page" aria-describedby={shareProblem === null ? undefined : "share-problem"} title={shareProblem === null ? "Copy a link for people who have their own link to this bot" : undefined} onclick={copyLink}><Icon name="link" size={18} /> Copy link</button>
     </div>
   </div>
   {#if shareProblem !== null}
@@ -201,22 +201,15 @@
 </section>
 
 <style>
-  .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
   .heading-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .share { display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
-  .manual-link { display: grid; gap: 0.35rem; margin: -0.25rem 0 1rem; }
-  .share-problem { margin: -0.25rem 0 1rem; }
-  .manual-link input { width: 100%; min-width: 0; }
-  h1 { margin: 0; overflow-wrap: anywhere; }
+  .manual-link { display: grid; gap: 0.35rem; margin: -0.5rem 0 1.25rem; }
+  .share-problem { margin: -0.5rem 0 1.25rem; }
+  .manual-link input { width: 100%; }
   .sort select { max-width: 100%; }
-  .pagination { display: flex; align-items: center; justify-content: center; gap: 1rem; margin: 0 0 1.25rem; }
+  .pagination { display: flex; align-items: center; justify-content: center; gap: 1rem; margin: 0 0 1.25rem; font-variant-numeric: tabular-nums; }
   .pagination.bottom { margin: 1.5rem 0 0; }
   .group { margin-bottom: 2rem; }
-  .detail-header { display: flex; gap: 1.5rem; align-items: center; margin: 1rem 0 2rem; }
-  .detail-art { width: 11rem; flex: none; }
-  .detail-info { min-width: 0; }
-  .metadata { display: flex; flex-wrap: wrap; gap: 0.7rem; }
-  .detail-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .metadata { display: flex; flex-wrap: wrap; gap: 0 0.75rem; font-variant-numeric: tabular-nums; }
   .sonic-header { margin: 0 0 1.25rem; }
-  @media (max-width: 600px) { .detail-header { gap: 1rem; align-items: flex-start; } .detail-art { width: 6.5rem; } .detail-actions { flex-direction: column; align-items: flex-start; } }
+  @media (max-width: 600px) { .detail-actions { flex-direction: column; align-items: flex-start; } }
 </style>

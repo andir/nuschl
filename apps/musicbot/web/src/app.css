@@ -96,6 +96,43 @@ progress { height: 0.5rem; }
 .eyebrow { color: var(--muted); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; }
 
+/* Tiles: square cover, then title, a muted line, facts and a centered row of actions. */
+.tile { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; padding: 0.6rem; }
+.tile[draggable="true"] { cursor: grab; }
+.tile:hover, .tile:focus-within { border-color: var(--accent); }
+.tile .art-link { display: block; margin-bottom: 0.5rem; }
+.tile-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.95rem; font-weight: 600; }
+.tile-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85rem; }
+.tile-meta { display: flex; flex-wrap: wrap; gap: 0 0.5rem; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.tile-actions { display: flex; justify-content: center; gap: 0.25rem; margin-top: auto; padding-top: 0.35rem; }
+.tile.artist { text-align: center; }
+.tile.artist .tile-meta { justify-content: center; }
+
+/* Track rows: a card holding rounded rows, cover or number first. */
+.rows { list-style: none; margin: 0; padding: 0.35rem; }
+.rows:empty { display: none; }
+.rows > li { display: flex; align-items: center; gap: 0.9rem; min-height: 3.4rem; padding: 0.35rem 0.5rem; border-radius: var(--radius); }
+.rows > li:hover, .rows > li:focus-within { background: var(--surface-2); }
+.row-number { flex: none; width: 1.75rem; text-align: center; color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.row-text { flex: 1; min-width: 0; }
+.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.row-sub { display: flex; gap: 0.6rem; color: var(--muted); font-size: 0.85rem; }
+.row-sub > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-duration { flex: none; color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Page heading with actions on the right; detail pages put a large cover beside the facts. */
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+.section-heading h1 { margin: 0; overflow-wrap: anywhere; }
+.heading-link { display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+.detail-header { display: flex; gap: 1.5rem; align-items: flex-end; margin: 0 0 1.5rem; }
+.detail-header[draggable="true"] { cursor: grab; }
+.detail-art { width: 180px; flex: none; }
+.detail-art .cover { box-shadow: var(--shadow); }
+.detail-info { display: grid; gap: 0.5rem; min-width: 0; overflow-wrap: anywhere; }
+.detail-info p { margin: 0; }
+.detail-info .metadata { display: flex; flex-wrap: wrap; gap: 0 0.75rem; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+.detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.25rem; }
+
 /* Text */
 .small { font-size: 0.8rem; }
 .muted { color: var(--muted); }
@@ -111,5 +148,12 @@ progress { height: 0.5rem; }
 .skip-link { position: fixed; top: -10rem; left: 1rem; z-index: 100; padding: 0.6rem 1rem; color: var(--accent-fg); background: var(--accent); border-radius: 999px; font-weight: 500; }
 .skip-link:hover { color: var(--accent-fg); }
 .skip-link:focus { top: 0.5rem; }
-@media (max-width: 480px) { .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem; } }
+@media (max-width: 600px) {
+  .detail-header { gap: 1rem; align-items: flex-start; }
+  .detail-art { width: 6.5rem; }
+}
+@media (max-width: 480px) {
+  .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem; }
+  .rows > li { gap: 0.5rem; padding-inline: 0.35rem; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; } }

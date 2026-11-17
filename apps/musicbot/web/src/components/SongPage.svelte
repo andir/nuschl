@@ -88,17 +88,11 @@
 </section>
 
 <style>
-  .detail-header { display: flex; gap: 1.5rem; align-items: center; margin: 1rem 0 2rem; }
-  .detail-header[draggable="true"] { cursor: grab; }
-  .detail-art { width: 11rem; flex: none; }
-  .detail-info { min-width: 0; display: grid; gap: 0.5rem; }
-  .detail-info p { margin: 0; overflow-wrap: anywhere; }
-  .facts { display: flex; flex-wrap: wrap; gap: 0.35rem 1.25rem; margin: 0.25rem 0 0; font-size: 0.85rem; }
-  .facts dt { color: var(--muted); font-size: 0.75rem; }
-  .facts dd { margin: 0; }
-  .detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+  .facts { display: flex; flex-wrap: wrap; gap: 0.35rem 1.5rem; margin: 0.25rem 0 0; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  .facts dt { color: var(--muted); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+  .facts dd { margin: 0; font-weight: 500; }
   .action-link { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.9rem; }
   .group { margin-bottom: 2rem; }
   .group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  @media (max-width: 600px) { .detail-header { gap: 1rem; align-items: flex-start; } .detail-art { width: 6.5rem; } .detail-actions { flex-direction: column; align-items: flex-start; } }
+  @media (max-width: 600px) { .detail-actions { flex-direction: column; align-items: flex-start; } }
 </style>
