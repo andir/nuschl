@@ -111,6 +111,7 @@ pub fn router(bot: Arc<Bot>) -> Router {
             get(playlists::favorite).post(playlists::set_favorite),
         )
         .route("/u/{token}/api/search", get(search))
+        .route("/u/{token}/api/suggest", get(suggest))
         .route("/u/{token}/api/song", get(song))
         .route("/u/{token}/api/similar", get(similar))
         .route("/u/{token}/api/lyrics", get(lyrics))
@@ -1711,6 +1712,31 @@ struct LibraryResults {
     error: Option<String>,
 }
 
+/// Runs `call` on every library with at most eight calls in flight and answers
+/// in library order. Overload fails the whole request at once; other failures
+/// stay with their library.
+async fn ask_every<T: Send + 'static>(
+    bot: &Bot,
+    call: impl Fn(&Library) -> Result<T, subsonic::Error> + Clone + Send + 'static,
+) -> Result<Vec<(usize, Result<T, ApiError>)>, ApiError> {
+    let calls = futures_util::stream::iter(0..bot.libraries.len())
+        .map(|library| {
+            let call = call.clone();
+            async move {
+                match ask(bot, library, call).await {
+                    // Reject overload promptly instead of waiting for the other
+                    // calls; their permits stay with their blocking workers.
+                    Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => Err(error),
+                    result => Ok((library, result)),
+                }
+            }
+        })
+        .buffer_unordered(MAX_LIBRARY_CALLS);
+    let mut found: Vec<_> = calls.try_collect().await?;
+    found.sort_unstable_by_key(|(library, _)| *library);
+    Ok(found)
+}
+
 /// Searches any number of libraries, with at most eight calls in flight.
 async fn search(
     State(bot): State<Arc<Bot>>,
@@ -1724,23 +1750,7 @@ async fn search(
             results: Vec::new(),
         }));
     }
-    let searches = futures_util::stream::iter(0..bot.libraries.len())
-        .map(|library| {
-            let text = text.clone();
-            let bot = &bot;
-            async move {
-                let result = ask(bot, library, move |library| library.search(&text)).await;
-                match result {
-                    // Reject overload promptly instead of waiting for the other
-                    // searches; their permits stay with their blocking workers.
-                    Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => Err(error),
-                    result => Ok((library, result)),
-                }
-            }
-        })
-        .buffer_unordered(MAX_LIBRARY_CALLS);
-    let mut found: Vec<_> = searches.try_collect().await?;
-    found.sort_unstable_by_key(|(library, _)| *library);
+    let found = ask_every(&bot, move |library| library.search(&text)).await?;
     let mut results = Vec::with_capacity(found.len());
     for (library, result) in found {
         let name = bot.libraries[library].name.clone();
@@ -1764,6 +1774,95 @@ async fn search(
         });
     }
     Ok(Json(SearchResults { results }))
+}
+
+/// Suggestion queries shorter than this, in characters, answer with no items.
+const MIN_SUGGEST_QUERY: usize = 2;
+/// Most items one suggestion answer holds.
+const MAX_SUGGESTIONS: usize = 10;
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SuggestionKind {
+    Artist,
+    Album,
+    Song,
+}
+
+#[derive(Debug, Serialize)]
+struct Suggestion {
+    library: usize,
+    kind: SuggestionKind,
+    id: String,
+    title: String,
+    /// The artist of an album or song.
+    subtitle: Option<String>,
+    cover_art: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Suggestions {
+    items: Vec<Suggestion>,
+}
+
+/// A few artists, albums and songs for the text typed so far: artists of every
+/// library first, then albums, then songs, cut to `MAX_SUGGESTIONS`. Libraries
+/// that fail add nothing.
+async fn suggest(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Suggestions>, ApiError> {
+    owner(&bot, &token)?;
+    let text: String = query.q.trim().chars().take(MAX_QUERY).collect();
+    if text.chars().count() < MIN_SUGGEST_QUERY {
+        return Ok(Json(Suggestions { items: Vec::new() }));
+    }
+    let found: Vec<_> = ask_every(&bot, move |library| library.suggest(&text))
+        .await?
+        .into_iter()
+        .filter_map(|(_, result)| result.ok())
+        .collect();
+    let artists = found
+        .iter()
+        .flat_map(|found| &found.artists)
+        .map(|artist| Suggestion {
+            library: artist.library,
+            kind: SuggestionKind::Artist,
+            id: artist.id.clone(),
+            title: artist.name.clone(),
+            subtitle: None,
+            cover_art: artist.cover_art.clone(),
+        });
+    let albums = found
+        .iter()
+        .flat_map(|found| &found.albums)
+        .map(|album| Suggestion {
+            library: album.library,
+            kind: SuggestionKind::Album,
+            id: album.id.clone(),
+            title: album.name.clone(),
+            subtitle: album.artist.clone(),
+            cover_art: album.cover_art.clone(),
+        });
+    let songs = found
+        .iter()
+        .flat_map(|found| &found.songs)
+        .map(|song| Suggestion {
+            library: song.library,
+            kind: SuggestionKind::Song,
+            id: song.id.clone(),
+            title: song.title.clone(),
+            subtitle: song.artist.clone(),
+            cover_art: song.cover_art.clone(),
+        });
+    Ok(Json(Suggestions {
+        items: artists
+            .chain(albums)
+            .chain(songs)
+            .take(MAX_SUGGESTIONS)
+            .collect(),
+    }))
 }
 
 /// Adding music, or 404 where it is not configured.
@@ -3781,6 +3880,140 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(missing.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn suggestions_ask_for_few_matches_and_reject_overload() {
+        let _exclusive = API_TESTS.lock().await;
+        let server = Server::new(|request, socket| {
+            use std::io::Write;
+            let body = if request.contains("query=broken") {
+                serde_json::json!({"subsonic-response": {"status": "failed", "error": {"code": 0}}})
+            } else {
+                // More of each kind than asked for, as a server may send.
+                let entries = |prefix: &str, count: usize| {
+                    (0..count)
+                        .map(|n| {
+                            serde_json::json!({"id": format!("{prefix}{n}"),
+                            "name": format!("{prefix} {n}"), "title": format!("{prefix} {n}"),
+                            "artist": "Waves", "coverArt": format!("c-{prefix}{n}")})
+                        })
+                        .collect::<Vec<_>>()
+                };
+                serde_json::json!({"subsonic-response": {"status": "ok", "searchResult3": {
+                    "artist": entries("ar", 5), "album": entries("al", 5), "song": entries("s", 8)}}})
+            };
+            let body = serde_json::to_vec(&body).unwrap();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(&body).unwrap();
+        });
+        let (_directory, bot, token) = test_bot(&server.url, 2);
+        let ask = |q: &str| {
+            suggest(
+                State(bot.clone()),
+                Path(token.clone()),
+                Query(SearchQuery { q: q.into() }),
+            )
+        };
+
+        for short in ["", "w", "  w  ", "ü"] {
+            assert!(ask(short).await.ok().unwrap().items.is_empty());
+        }
+        assert!(server.requests().is_empty());
+
+        let items = ask(" wa ").await.ok().unwrap().0.items;
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        for request in &requests {
+            assert!(request.starts_with("GET /rest/search3?"));
+            for parameter in [
+                "&query=wa&",
+                "&songCount=5&",
+                "&albumCount=3&",
+                "&artistCount=3",
+            ] {
+                assert!(request.contains(parameter), "{parameter} in {request}");
+            }
+        }
+        // Three artists from each library, then albums until the bound.
+        assert_eq!(items.len(), MAX_SUGGESTIONS);
+        let order: Vec<_> = items
+            .iter()
+            .map(|item| (item.library, item.id.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (0, "ar0"),
+                (0, "ar1"),
+                (0, "ar2"),
+                (1, "ar0"),
+                (1, "ar1"),
+                (1, "ar2"),
+                (0, "al0"),
+                (0, "al1"),
+                (0, "al2"),
+                (1, "al0"),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&items[0]).unwrap(),
+            serde_json::json!({"library": 0, "kind": "artist", "id": "ar0", "title": "ar 0",
+                "subtitle": null, "cover_art": "c-ar0"})
+        );
+        assert_eq!(
+            serde_json::to_value(&items[6]).unwrap(),
+            serde_json::json!({"library": 0, "kind": "album", "id": "al0", "title": "al 0",
+                "subtitle": "Waves", "cover_art": "c-al0"})
+        );
+
+        // One library: the songs follow, cut at the bound.
+        let (_single, one, one_token) = test_bot(&server.url, 1);
+        let items = suggest(
+            State(one),
+            Path(one_token),
+            Query(SearchQuery { q: "wa".into() }),
+        )
+        .await
+        .ok()
+        .unwrap()
+        .0
+        .items;
+        let kinds: Vec<_> = items.iter().map(|item| &item.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                [&SuggestionKind::Artist; 3].as_slice(),
+                &[&SuggestionKind::Album; 3],
+                &[&SuggestionKind::Song; 4],
+            ]
+            .concat()
+        );
+        assert_eq!(
+            serde_json::to_value(&items[6]).unwrap(),
+            serde_json::json!({"library": 0, "kind": "song", "id": "s0", "title": "s 0",
+                "subtitle": "Waves", "cover_art": "c-s0"})
+        );
+
+        // Failing libraries add nothing.
+        assert!(ask("broken").await.ok().unwrap().items.is_empty());
+
+        let occupied = LIBRARY_CALLS
+            .acquire_many(MAX_LIBRARY_CALLS as u32)
+            .await
+            .unwrap();
+        let asked = server.requests().len();
+        let refused = tokio::time::timeout(Duration::from_millis(200), ask("wa"))
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(
+            (refused.0, refused.1.as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE, "the music library is busy")
+        );
+        assert_eq!(server.requests().len(), asked);
+        drop(occupied);
     }
 
     #[test]

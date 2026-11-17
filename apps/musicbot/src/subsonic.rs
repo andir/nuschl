@@ -184,6 +184,11 @@ pub struct Image {
 /// Cover art larger than this is refused.
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// How many matches of each kind a library contributes to search suggestions.
+const SUGGEST_SONGS: usize = 5;
+const SUGGEST_ALBUMS: usize = 3;
+const SUGGEST_ARTISTS: usize = 3;
+
 #[derive(Debug, Default)]
 pub struct SearchResult {
     pub songs: Vec<Track>,
@@ -453,12 +458,32 @@ impl Library {
     }
 
     pub fn search(&self, query: &str) -> Result<SearchResult, Error> {
+        self.search3(query, 40, 12, 8)
+    }
+
+    /// A few matches for the suggestions under the search field: at most
+    /// `SUGGEST_SONGS` songs, `SUGGEST_ALBUMS` albums and `SUGGEST_ARTISTS` artists.
+    pub fn suggest(&self, query: &str) -> Result<SearchResult, Error> {
+        let mut found = self.search3(query, SUGGEST_SONGS, SUGGEST_ALBUMS, SUGGEST_ARTISTS)?;
+        found.songs.truncate(SUGGEST_SONGS);
+        found.albums.truncate(SUGGEST_ALBUMS);
+        found.artists.truncate(SUGGEST_ARTISTS);
+        Ok(found)
+    }
+
+    fn search3(
+        &self,
+        query: &str,
+        songs: usize,
+        albums: usize,
+        artists: usize,
+    ) -> Result<SearchResult, Error> {
         let reply = self.call(
             self.get("search3")
                 .query("query", query)
-                .query("songCount", "40")
-                .query("albumCount", "12")
-                .query("artistCount", "8"),
+                .query("songCount", songs.to_string())
+                .query("albumCount", albums.to_string())
+                .query("artistCount", artists.to_string()),
         )?;
         let found = reply.search_result3.unwrap_or_default();
         Ok(SearchResult {
