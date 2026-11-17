@@ -614,6 +614,75 @@ impl Library {
         Ok((playlist.info.playlist(self.index), songs))
     }
 
+    /// Makes an empty playlist owned by the configured account and keeps it
+    /// private there. A playlist that cannot be made private is deleted again.
+    pub fn create_playlist(&self, name: &str) -> Result<Playlist, Error> {
+        let reply = self.call(self.get("createPlaylist").query("name", name))?;
+        let playlist = reply
+            .playlist
+            .ok_or_else(|| missing("playlist"))?
+            .info
+            .playlist(self.index);
+        if let Err(error) = self.update_playlist(&playlist.id, None, Some(false)) {
+            if let Err(cleanup) = self.delete_playlist(&playlist.id) {
+                tracing::warn!("{}: playlist {}: {cleanup}", self.name, playlist.id);
+            }
+            return Err(error);
+        }
+        Ok(playlist)
+    }
+
+    /// Renames a playlist or sets whether the library shows it to its other accounts.
+    pub fn update_playlist(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        public: Option<bool>,
+    ) -> Result<(), Error> {
+        let mut request = self.get("updatePlaylist").query("playlistId", id);
+        if let Some(name) = name {
+            request = request.query("name", name);
+        }
+        if let Some(public) = public {
+            request = request.query("public", if public { "true" } else { "false" });
+        }
+        self.call(request)?;
+        Ok(())
+    }
+
+    /// Appends songs, in requests of a bounded URL length.
+    pub fn add_to_playlist(&self, id: &str, songs: &[String]) -> Result<(), Error> {
+        for chunk in song_chunks(songs) {
+            let mut request = self.get("updatePlaylist").query("playlistId", id);
+            for song in chunk {
+                request = request.query("songIdToAdd", song);
+            }
+            self.call(request)?;
+        }
+        Ok(())
+    }
+
+    /// Removes the songs at `indices` (positions in the playlist). Higher
+    /// positions go first, so each request leaves the remaining ones in place.
+    pub fn remove_from_playlist(&self, id: &str, indices: &[usize]) -> Result<(), Error> {
+        let mut indices = indices.to_vec();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        indices.dedup();
+        for chunk in indices.chunks(PLAYLIST_CHUNK_SONGS) {
+            let mut request = self.get("updatePlaylist").query("playlistId", id);
+            for index in chunk {
+                request = request.query("songIndexToRemove", index.to_string());
+            }
+            self.call(request)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_playlist(&self, id: &str) -> Result<(), Error> {
+        self.call(self.get("deletePlaylist").query("id", id))?;
+        Ok(())
+    }
+
     /// Cover art at most `size` pixels wide, if the server scales it. Only
     /// the common web image types are passed on.
     pub fn cover_art(&self, id: &str, size: u32) -> Result<Image, Error> {
@@ -724,6 +793,33 @@ impl Library {
             extension,
         })
     }
+}
+
+/// Songs per playlist change request.
+const PLAYLIST_CHUNK_SONGS: usize = 100;
+/// Bytes the song parameters of one request may take, counting every id byte
+/// as percent-encoded, so request URLs stay within common server limits.
+const PLAYLIST_CHUNK_BYTES: usize = 4096;
+
+/// Splits songs into runs whose `songIdToAdd` parameters fit one request.
+fn song_chunks(songs: &[String]) -> Vec<&[String]> {
+    const PARAMETER: usize = "&songIdToAdd=".len();
+    let mut chunks = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (index, song) in songs.iter().enumerate() {
+        let cost = PARAMETER + 3 * song.len();
+        if index > start
+            && (index - start == PLAYLIST_CHUNK_SONGS || bytes + cost > PLAYLIST_CHUNK_BYTES)
+        {
+            chunks.push(&songs[start..index]);
+            (start, bytes) = (index, 0);
+        }
+        bytes += cost;
+    }
+    if start < songs.len() {
+        chunks.push(&songs[start..]);
+    }
+    chunks
 }
 
 pub(crate) fn transport_agent(
@@ -1769,5 +1865,90 @@ pub(crate) mod tests {
             assert_eq!(AlbumList::parse(list.name()), Some(list));
         }
         assert_eq!(AlbumList::parse("byGenre"), None);
+    }
+
+    #[test]
+    fn playlist_changes_keep_requests_short_and_remove_from_the_end() {
+        let songs: Vec<String> = (0..250).map(|index| format!("s{index}")).collect();
+        let chunks = song_chunks(&songs);
+        assert_eq!(
+            chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>(),
+            [100, 100, 50]
+        );
+        let long: Vec<String> = (0..30).map(|index| format!("{index:0>128}")).collect();
+        let chunks = song_chunks(&long);
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.concat(), long);
+        for chunk in chunks {
+            let bytes: usize = chunk.iter().map(|song| 13 + 3 * song.len()).sum();
+            assert!(bytes <= PLAYLIST_CHUNK_BYTES, "{bytes}");
+        }
+        assert!(song_chunks(&[]).is_empty());
+
+        let server = Server::new(|request, socket| {
+            let body = if request.starts_with("GET /rest/createPlaylist") {
+                r#"{"subsonic-response":{"status":"ok","playlist":{"id":"p1","name":"Road trip","songCount":0}}}"#
+            } else {
+                r#"{"subsonic-response":{"status":"ok"}}"#
+            };
+            json(socket, body);
+        });
+        let library = library(&server);
+        let made = library.create_playlist("Road trip & more").unwrap();
+        assert_eq!((made.id.as_str(), made.library), ("p1", 0));
+        library.add_to_playlist("p1", &songs[..3]).unwrap();
+        library.remove_from_playlist("p1", &[2, 7, 2, 5]).unwrap();
+        library.update_playlist("p1", Some("New"), None).unwrap();
+        library.delete_playlist("p1").unwrap();
+        let lines: Vec<String> = server
+            .requests()
+            .iter()
+            .map(|request| request.lines().next().unwrap().to_owned())
+            .collect();
+        let expected = [
+            ("createPlaylist", "&name=Road%20trip%20%26%20more "),
+            ("updatePlaylist", "&playlistId=p1&public=false "),
+            (
+                "updatePlaylist",
+                "&playlistId=p1&songIdToAdd=s0&songIdToAdd=s1&songIdToAdd=s2 ",
+            ),
+            (
+                "updatePlaylist",
+                "&playlistId=p1&songIndexToRemove=7&songIndexToRemove=5&songIndexToRemove=2 ",
+            ),
+            ("updatePlaylist", "&playlistId=p1&name=New "),
+            ("deletePlaylist", "&id=p1 "),
+        ];
+        assert_eq!(lines.len(), expected.len(), "{lines:#?}");
+        for (line, (endpoint, ending)) in lines.iter().zip(expected) {
+            assert!(
+                line.starts_with(&format!("GET /rest/{endpoint}?apiKey=private-key&"))
+                    && line.ends_with(&format!("{ending}HTTP/1.1")),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_playlist_that_cannot_be_made_private_is_deleted_again() {
+        let server = Server::new(|request, socket| {
+            let body = if request.starts_with("GET /rest/createPlaylist") {
+                r#"{"subsonic-response":{"status":"ok","playlist":{"id":"p1","name":"x"}}}"#
+            } else if request.starts_with("GET /rest/updatePlaylist") {
+                r#"{"subsonic-response":{"status":"failed","error":{"code":50}}}"#
+            } else {
+                r#"{"subsonic-response":{"status":"ok"}}"#
+            };
+            json(socket, body);
+        });
+        let library = library(&server);
+        assert!(matches!(
+            library.create_playlist("x"),
+            Err(Error::Api { code: 50, .. })
+        ));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("GET /rest/deletePlaylist?"));
+        assert!(requests[2].contains("&id=p1 "));
     }
 }
