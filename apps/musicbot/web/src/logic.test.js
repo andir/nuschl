@@ -8,7 +8,7 @@ import {
   mergeHistory, libraryForNamespace, routeForNamespace, browseItemIsCurrent, similarityPercent, sonicPathStart,
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
-  groupPlaylists, editablePlaylists,
+  groupPlaylists, editablePlaylists, lyricLineAt,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -560,4 +560,16 @@ test("playlists group into the caller's own, other people's and the library's", 
   assert.deepEqual(editablePlaylists(list).map((item) => item.id), ["fav", "alpha", "zebra", "bob-shared"]);
   assert.deepEqual(groupPlaylists(null), { mine: [], others: [], library: [] });
   assert.deepEqual(editablePlaylists(undefined), []);
+});
+
+test("the sung lyric line is the last one begun", () => {
+  const lines = [{ start_ms: 1000 }, { start_ms: 4000 }, { start_ms: 4000 }, { start_ms: 9000 }];
+  assert.equal(lyricLineAt(lines, 0), -1);
+  assert.equal(lyricLineAt(lines, 999), -1);
+  assert.equal(lyricLineAt(lines, 1000), 0);
+  assert.equal(lyricLineAt(lines, 4500), 2);
+  assert.equal(lyricLineAt(lines, 120000), 3);
+  assert.equal(lyricLineAt([], 5), -1);
+  assert.equal(lyricLineAt(null, 5), -1);
+  assert.equal(lyricLineAt(lines, NaN), -1);
 });

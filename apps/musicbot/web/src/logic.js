@@ -497,3 +497,19 @@ export function groupPlaylists(playlists) {
 export function editablePlaylists(playlists) {
   return (Array.isArray(playlists) ? playlists : []).filter((playlist) => playlist.editable === true).sort(playlistOrder);
 }
+
+/**
+ * Index of the synced lyric line sung at `ms`: the last line that has begun,
+ * or -1 before the first. `lines` are ordered by `start_ms`.
+ */
+export function lyricLineAt(lines, ms) {
+  if (!Array.isArray(lines) || !Number.isFinite(ms)) return -1;
+  let low = 0;
+  let high = lines.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if ((lines[middle]?.start_ms ?? Infinity) <= ms) low = middle + 1;
+    else high = middle;
+  }
+  return low - 1;
+}

@@ -12,6 +12,7 @@
   import Icon from "./Icon.svelte";
   import AddToPlaylist from "./AddToPlaylist.svelte";
   import FavoriteHeart from "./FavoriteHeart.svelte";
+  import Lyrics from "./Lyrics.svelte";
 
   /** `data` is the `api/song` response; `current` says whether `namespace` still holds. */
   let { data, namespace, current } = $props();
@@ -63,6 +64,11 @@
   </div>
 </div>
 
+<section class="group" aria-labelledby="song-lyrics">
+  <h2 id="song-lyrics">Lyrics</h2>
+  <div class="lyrics-card card"><Lyrics library={song.library} songId={song.id} title={song.title} {namespace} /></div>
+</section>
+
 {#if sonic}
   <section class="group" aria-labelledby="song-similar">
     <div class="group-heading">
@@ -97,6 +103,7 @@
   .facts dd { margin: 0; font-weight: 500; }
   .action-link { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.9rem; }
   .group { margin-bottom: 2rem; }
+  .lyrics-card { max-width: 46rem; padding: 0.75rem 0.5rem; }
   .group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   @media (max-width: 600px) { .detail-actions { flex-direction: column; align-items: flex-start; } }
 </style>

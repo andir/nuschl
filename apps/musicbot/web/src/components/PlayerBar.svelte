@@ -113,8 +113,11 @@
         <button class="icon-btn" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
           <Icon name="skip" />
         </button>
-        <button class="icon-btn" aria-label="Open big screen" aria-haspopup="dialog" title="Big screen" onclick={onexpand}>
+        <button class="icon-btn" aria-label="Open big screen" aria-haspopup="dialog" title="Big screen" onclick={(event) => { store.bigScreenLyrics = false; onexpand(event); }}>
           <Icon name="expand" />
+        </button>
+        <button class="icon-btn" disabled={!track} aria-label="Lyrics" aria-haspopup="dialog" title="Lyrics on the big screen" onclick={(event) => { store.bigScreenLyrics = true; onexpand(event); }}>
+          <Icon name="lyrics" />
         </button>
       </div>
     </div>

@@ -31,6 +31,8 @@ class Store {
   browseKey = $state(null);
   browseSignal = $state.raw(null);
   toasts = $state([]);
+  /** The big screen shows the playing song's lyrics in place of the next songs. */
+  bigScreenLyrics = $state(false);
   /** Optimistic values by key (`queue:N`, `volume:N`, `ducking:N`): `{ value, version, settled }`. */
   overrides = $state.raw({});
   /** Seeks not yet reflected by the server, by queue index: `{ target, at, entry, version, sent }`. */

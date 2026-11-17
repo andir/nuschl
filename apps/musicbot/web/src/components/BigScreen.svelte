@@ -10,6 +10,7 @@
   import SongRating from "./SongRating.svelte";
   import BrowserListen from "./BrowserListen.svelte";
   import FavoriteHeart from "./FavoriteHeart.svelte";
+  import Lyrics from "./Lyrics.svelte";
   import { playerStatus } from "./PlayerBar.svelte";
 
   // `onclose(navigated)`: navigated is true when a link or history step moved to another page.
@@ -81,6 +82,9 @@
       </label>
     {/if}
     <div class="top-actions">
+      <button class="icon-btn" class:active={store.bigScreenLyrics} aria-label="Lyrics" aria-pressed={store.bigScreenLyrics} title={store.bigScreenLyrics ? "Show the next songs" : "Show the lyrics"} onclick={() => (store.bigScreenLyrics = !store.bigScreenLyrics)}>
+        <Icon name="lyrics" size={28} />
+      </button>
       {#if canFullscreen}
         <button class="icon-btn" aria-label="Full screen" aria-pressed={fullscreen} title={fullscreen ? "Leave full screen" : "Full screen"} onclick={toggleFullscreen}>
           <Icon name={fullscreen ? "fullscreen-exit" : "fullscreen"} size={28} />
@@ -158,7 +162,14 @@
 
       <p class="status" class:error={statusError} role="status" title={status ?? ""}>{status ?? ""}</p>
 
-      {#if upcoming.length}
+      {#if store.bigScreenLyrics && track}
+        <section class="lyrics-panel card" aria-label="Lyrics">
+          <h3 class="eyebrow">Lyrics</h3>
+          {#key `${track.library}:${track.id}`}
+            <Lyrics library={track.library} songId={track.id} title={track.title} namespace={store.browseKey} large />
+          {/key}
+        </section>
+      {:else if upcoming.length}
         <section class="up-next card" aria-label="Up next">
           <h3 class="eyebrow">Up next</h3>
           <ol>
@@ -240,7 +251,7 @@
   .status { min-height: 1.5rem; margin: 0; overflow-wrap: anywhere; text-align: center; color: var(--muted); }
   .status.error { color: var(--error); }
 
-  .up-next { min-width: 0; padding: 0.75rem; }
+  .up-next, .lyrics-panel { min-width: 0; padding: 0.75rem; }
   h3 { margin: 0 0 0.5rem 0.25rem; }
   ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
   li { display: flex; align-items: center; gap: 0.75rem; min-width: 0; padding: 0.3rem 0.25rem; }
