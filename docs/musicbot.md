@@ -23,9 +23,15 @@ browsers. People control what plays on a web page; they get their link by writin
   pick runs the full search; Escape closes the list. Every song, album and
   playlist has *Add* and *Play next*. Song titles open the song's page: its
   details (track, disc, length, year, genre, format, play count), rating, the
-  albums it appears on and, with sonic similarity, similar songs.
+  albums it appears on and, with sonic similarity, similar songs. The genre
+  there links to the genre's page.
   Choose the destination queue in the player bar; the browser remembers the
   selection for the page (per public address and path).
+- **Genres.** The Genres page lists a library's genres with their album and
+  song counts, sorted by name or by size, and a field that narrows the list by
+  name. A genre's page shows its counts, its albums 48 per page and its songs
+  50 per page; *Add all* and *Play all next* queue the page of songs on screen.
+  Links to genre pages carry the genre's name, so they work when shared.
 - **Sonic similarity.** Libraries with the OpenSubsonic `sonicSimilarity` extension
   offer **Similar songs** for library tracks and the playing song, plus **Blend
   into this song**: songs that lead from the playing song to a chosen one by how
@@ -812,8 +818,9 @@ and library failures the redacted errors of browsing.
 is the index after removing the moved entry. `add.index` is an insertion position,
 or null for the end. Successful commands return 204 and broadcast the new state.
 
-Browsing uses `albums`, `album`, `artists`, `artist`, `playlists`, `playlist`,
-`search` and `suggest` JSON endpoints. Library identity in requests is its current config index.
+Browsing uses `albums`, `album`, `artists`, `artist`, `genres`, `genre/albums`,
+`genre/songs`, `playlists`, `playlist`, `search` and `suggest` JSON endpoints.
+Library identity in requests is its current config index.
 Album lists accept `library`, `list`, and `page`; detail endpoints accept `library`
 and `id`. The authenticated `art/<library>/<id>?size=…&v=…` route returns
 `image/png`: a PNG the content worker made from the decoded art (8-bit RGBA,
@@ -867,6 +874,24 @@ extension answer these endpoints with an error instead of being queried.
 library has none. `start_ms` is set on every line of synced lyrics and null
 otherwise. Library failures return the redacted errors of browsing.
 
+`GET genres?library=N` returns `{"genres":[{"name":"…","albums":N|null,
+"songs":N|null}],"truncated":bool}` from the library's `getGenres`: sorted by
+name ignoring case, each name once, at most 2,000, with `truncated` true when the
+library has more. The list holds the genres whose names have 1 to 200
+characters. Counts come from `albumCount` and `songCount`; whole numbers given
+as text count as numbers, and every other value gives null.
+`GET genre/albums?library=N&name=…&page=P` returns `{"albums":[Album],"more":bool}`,
+48 albums per page from `getAlbumList2` with `type=byGenre`, and
+`GET genre/songs?library=N&name=…&page=P` returns `{"songs":[Track],"more":bool}`,
+50 songs per page from `getSongsByGenre`. `name` is the genre's name as a
+percent-encoded query value, and the bot passes it to the library as one query
+value too. An empty name or one over 200 characters answers 400 before any
+library call. Pages run from 0 to 10,000; the bot keeps at most one page of
+what the library sends. Library failures answer with the redacted errors of
+browsing, and with all eight library calls in use the answer is 503 `the music
+library is busy`. The web page's routes are `#/genres?library=N` and
+`#/genre?library=N&name=…`.
+
 `GET suggest?q=…` returns `{"items":[{"library":N,"kind":"artist"|"album"|"song",
 "id":"ID","title":"…","subtitle":"…"|null,"cover_art":"ID"|null}]}` for the
 suggestions under the search field. `q` is trimmed and cut to 200 characters;
@@ -880,8 +905,10 @@ all eight in use the answer is 503 `the music library is busy`, and the page
 then shows no suggestions. Subsonic and OpenSubsonic define no suggestion call;
 Navidrome's `search3` matches the start of each word, which suits typing.
 
-`add` also accepts `kind: "similar"` with the song in `id`, and `kind: "path"` with
-the start in `id` and the target in `to`. The bot asks the library again when
+`add` also accepts `kind: "similar"` with the song in `id`, `kind: "path"` with
+the start in `id` and the target in `to`, and `kind: "genre"` with the genre's
+name in `id` and an optional `page` (from 0), which queues that page of the
+genre's songs, at most 50. The bot asks the library again when
 adding. A path skips its first song when that song is already playing in the queue.
 Similar songs, listed and added, hold each recording once: the song itself, every
 match with a similarity of 100% and every match with its title and artist are left
