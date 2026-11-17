@@ -107,6 +107,7 @@ progress { height: 0.5rem; }
 .tile-actions { display: flex; justify-content: center; gap: 0.25rem; margin-top: auto; padding-top: 0.35rem; }
 .tile.artist { text-align: center; }
 .tile.artist .tile-meta { justify-content: center; }
+.tile-badges { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.3rem; }
 
 /* Track rows: a card holding rounded rows, cover or number first. */
 .rows { list-style: none; margin: 0; padding: 0.35rem; }
@@ -132,6 +133,15 @@ progress { height: 0.5rem; }
 .detail-info p { margin: 0; }
 .detail-info .metadata { display: flex; flex-wrap: wrap; gap: 0 0.75rem; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
 .detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.25rem; }
+
+/* Menus: a card of full-width items that opens beside its button. */
+.menu { position: absolute; z-index: 30; display: grid; gap: 0.1rem; width: min(17rem, calc(100vw - 1.5rem)); max-height: min(22rem, calc(100dvh - 9rem)); overflow-y: auto; padding: 0.35rem; text-align: left; }
+.menu-item { display: flex; align-items: center; gap: 0.5rem; width: 100%; padding: 0.45rem 0.6rem; border: none; border-radius: var(--radius); background: transparent; color: var(--fg); font-size: 0.9rem; text-align: left; }
+.menu-item:hover:not(:disabled), .menu-item:focus-visible { background: var(--surface-2); }
+.menu-item:disabled { opacity: 0.5; }
+.menu-item .menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-note { margin: 0; padding: 0.45rem 0.6rem; color: var(--muted); font-size: 0.85rem; }
+.menu hr { width: 100%; margin: 0.25rem 0; border: none; border-top: 1px solid var(--border); }
 
 /* Text */
 .small { font-size: 0.8rem; }

@@ -475,3 +475,25 @@ export function budgetText(budget) {
   const left = Math.min(mine, total);
   return `You can add ${left} more ${left === 1 ? "track" : "tracks"} today.`;
 }
+
+const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+// Favorites first, then the caller's own, then by name.
+const playlistOrder = (a, b) => Number(b.favorites === true) - Number(a.favorites === true) || Number(b.mine === true) - Number(a.mine === true) || byName(a, b);
+
+/**
+ * The Playlists page's sections: the caller's own (Favorites first), other
+ * people's personal playlists by name, then the library's in its order.
+ */
+export function groupPlaylists(playlists) {
+  const list = Array.isArray(playlists) ? playlists : [];
+  return {
+    mine: list.filter((playlist) => playlist.personal && playlist.mine).sort(playlistOrder),
+    others: list.filter((playlist) => playlist.personal && !playlist.mine).sort(byName),
+    library: list.filter((playlist) => !playlist.personal),
+  };
+}
+
+/** The playlists the caller may add songs to, for the "Add to playlist" menu. */
+export function editablePlaylists(playlists) {
+  return (Array.isArray(playlists) ? playlists : []).filter((playlist) => playlist.editable === true).sort(playlistOrder);
+}

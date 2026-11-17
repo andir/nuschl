@@ -10,7 +10,9 @@
   const current = $derived(store.browseItemCurrent({ library: item.library, namespace }));
   const addable = $derived(kind !== "artist" && current);
   const href = $derived(buildRoute({ view: kind, library: item.library, id: item.id, namespace }));
-  const subtitle = $derived(kind === "album" ? item.artist : kind === "playlist" ? item.owner : item.album_count == null ? null : `${item.album_count} albums`);
+  const subtitle = $derived(kind === "album" ? item.artist
+    : kind === "playlist" ? (item.personal ? (item.mine ? "Yours" : `By ${item.owner_name}`) : item.owner)
+    : item.album_count == null ? null : `${item.album_count} albums`);
 </script>
 
 <article class="tile card" class:artist={kind === "artist"} draggable={addable} ondragstart={(event) => {
@@ -22,6 +24,12 @@
   </a>
   <a class="tile-title" {href} draggable="false" title={item.name}>{item.name}</a>
   {#if subtitle}<div class="muted tile-sub" title={subtitle}>{subtitle}</div>{/if}
+  {#if kind === "playlist" && (item.favorites || item.shared)}
+    <div class="tile-badges">
+      {#if item.favorites}<span class="badge accent">Favorites</span>{/if}
+      {#if item.shared}<span class="badge success">Shared</span>{/if}
+    </div>
+  {/if}
   {#if item.year || item.song_count != null}
     <div class="muted tile-meta">
       {#if item.year}<span>{item.year}</span>{/if}

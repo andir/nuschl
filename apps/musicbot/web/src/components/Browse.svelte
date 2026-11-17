@@ -10,20 +10,26 @@
   import SongList from "./SongList.svelte";
   import SongPage from "./SongPage.svelte";
   import Icon from "./Icon.svelte";
+  import Playlists from "./Playlists.svelte";
+  import PlaylistTools from "./PlaylistTools.svelte";
+  import AddToPlaylist from "./AddToPlaylist.svelte";
 
   let { route } = $props();
   let page = $state(0);
   const namespace = store.browseKey;
   const current = $derived(namespace !== null && namespace === store.browseKey && store.connection === "open" && !store.invalid);
   const sonicView = $derived(route.view === "similar" || route.view === "path");
+  const playlistView = $derived(route.view === "playlists" || route.view === "playlist");
   const result = resource(() => {
     if (!current || (route.library != null && !store.browseItemCurrent({ library: route.library, namespace }))
       || ((route.id != null || route.to != null) && route.namespace !== namespace)) return null;
+    // Every viewer reloads playlists when anybody changes one.
+    if (playlistView) store.playlistRevision;
     if (route.view === "search") return route.q.trim() ? query("api/search", { q: route.q }) : null;
     if (route.view === "albums") return query("api/albums", { library: route.library, list: route.list, page });
     if (route.view === "path") return query("api/path", { library: route.library, from: route.from, to: route.to });
     return query(`api/${route.view}`, { library: route.library, ...(route.id == null ? {} : { id: route.id }) });
-  }, () => store.browseSignal);
+  }, () => store.browseSignal, undefined, { keep: true });
   const data = $derived(current ? result.data : null);
   const detail = $derived(sonicView ? null : data?.[route.view] ?? null);
   const songs = $derived(data?.songs ?? []);
@@ -70,6 +76,10 @@
     page = next;
     document.getElementById("main-content")?.scrollTo({ top: 0 });
   }
+
+  function removeSong(index, song) {
+    store.playlistChange("api/playlists/remove", { library: detail.library, id: detail.id, index, song: song.id }, namespace);
+  }
 </script>
 
 <section class="browse" aria-labelledby="browse-title" aria-busy={result.loading}>
@@ -105,7 +115,7 @@
 
   {#if !current}
     <p class="notice muted" role="status">Library browsing will resume after the connection is restored.</p>
-  {:else if result.loading}
+  {:else if result.loading && !data}
     <p class="notice" role="status">Loading library…</p>
   {:else if result.error}
     <div class="notice error" role="alert"><p>{result.error}</p><button class="btn" onclick={() => result.reload()}>Try again</button></div>
@@ -131,8 +141,7 @@
       {/each}
       {#if !data.groups.some((group) => group.artists.length)}<p class="notice muted">No artists in this library.</p>{/if}
     {:else if route.view === "playlists"}
-      <div class="media-grid">{#each data.playlists as playlist (playlist.id)}<MediaCard item={playlist} kind="playlist" {namespace} />{/each}</div>
-      {#if !data.playlists.length}<p class="notice muted">No playlists in this library.</p>{/if}
+      <Playlists playlists={data.playlists} library={route.library} {namespace} {current} />
     {:else if route.view === "search"}
       <p class="muted">Results for “{route.q}”</p>
       {#each data.results as library (library.library)}
@@ -174,7 +183,15 @@
           {#if detail.artist}
             <p>{#if detail.artist_id}<a href={buildRoute({ view: "artist", library: detail.library, id: detail.artist_id, namespace })}>{detail.artist}</a>{:else}{detail.artist}{/if}</p>
           {/if}
-          {#if detail.owner}<p class="muted">By {detail.owner}</p>{/if}
+          {#if route.view === "playlist" && detail.personal}
+            <p class="muted">{detail.mine ? "Yours" : `By ${detail.owner_name}`}</p>
+            {#if detail.favorites || detail.shared}
+              <p class="badges">
+                {#if detail.favorites}<span class="badge accent">Favorites</span>{/if}
+                {#if detail.shared}<span class="badge success">Shared</span>{/if}
+              </p>
+            {/if}
+          {:else if detail.owner}<p class="muted">By {detail.owner}</p>{/if}
           <p class="muted metadata">
             {#if detail.year}<span>{detail.year}</span>{/if}
             {#if route.view === "artist"}<span>{data.albums.length} albums</span>
@@ -184,7 +201,17 @@
             <div class="detail-actions">
               <button class="btn primary" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace })}><Icon name="add" /> Add to queue</button>
               <button class="btn" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace }, 0)}><Icon name="next" /> Play next</button>
+              {#if route.view === "album"}<AddToPlaylist library={detail.library} album={detail.id} title={detail.name} {namespace} />{/if}
             </div>
+          {/if}
+          {#if route.view === "playlist"}
+            {#if detail.manageable}
+              <PlaylistTools playlist={detail} {namespace} {current} />
+            {:else if !detail.personal}
+              <p class="muted small">Made in the library; read-only here.</p>
+            {:else if !detail.editable && store.canOwnPlaylists}
+              <p class="muted small">{detail.owner_name} changes this playlist; they can share it to let others edit.</p>
+            {/if}
           {/if}
         </div>
       </div>
@@ -193,7 +220,7 @@
         <div class="media-grid">{#each data.albums as album (album.id)}<MediaCard item={album} {namespace} />{/each}</div>
         {#if !data.albums.length}<p class="notice muted">No albums by this artist.</p>{/if}
       {:else}
-        <SongList {songs} {namespace} covers={route.view === "playlist"} />
+        <SongList {songs} {namespace} covers={route.view === "playlist"} onremove={route.view === "playlist" && detail.editable ? removeSong : null} />
         {#if !songs.length}<p class="notice muted">No tracks here.</p>{/if}
       {/if}
     {/if}
@@ -210,6 +237,7 @@
   .pagination.bottom { margin: 1.5rem 0 0; }
   .group { margin-bottom: 2rem; }
   .metadata { display: flex; flex-wrap: wrap; gap: 0 0.75rem; font-variant-numeric: tabular-nums; }
+  .badges { display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .sonic-header { margin: 0 0 1.25rem; }
   @media (max-width: 600px) { .detail-actions { flex-direction: column; align-items: flex-start; } }
 </style>

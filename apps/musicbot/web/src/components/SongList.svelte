@@ -6,9 +6,13 @@
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import SongRating from "./SongRating.svelte";
+  import AddToPlaylist from "./AddToPlaylist.svelte";
 
-  /** `similarities` is optional and parallel to `songs`: OpenSubsonic scores, null when unknown. */
-  let { songs, namespace, covers = false, similarities = null } = $props();
+  /**
+   * `similarities` is optional and parallel to `songs`: OpenSubsonic scores, null when unknown.
+   * `onremove(index, song)` adds a remove button to every row, for playlists the viewer edits.
+   */
+  let { songs, namespace, covers = false, similarities = null, onremove = null } = $props();
   const current = $derived(namespace !== null && namespace === store.browseKey && store.connection === "open" && !store.invalid);
   const playing = $derived(store.player?.current?.entry.track ?? null);
   const sonic = (song) => current && store.supportsSonic(song.library) && store.browseItemCurrent({ library: song.library, namespace });
@@ -35,7 +39,7 @@
         {#if percent !== null}<span class="similarity muted" title="Sonic similarity">{percent}%<span class="visually-hidden"> similar</span></span>{/if}
       {/if}
       <span class="row-duration">{formatDuration(song.duration)}</span>
-      <div class="actions" class:sonic={sonic(song)}>
+      <div class="actions">
         {#if sonic(song)}
           {@const from = sonicPathStart(playing, song)}
           <a class="icon-btn" draggable="false" href={buildRoute({ view: "similar", library: song.library, id: song.id, namespace })} aria-label="Songs similar to {song.title}" title="Similar songs"><Icon name="similar" /></a>
@@ -45,6 +49,8 @@
         {/if}
         <button class="icon-btn" disabled={!store.player || !current} aria-label="Add {song.title} to queue" title="Add to queue" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace })}><Icon name="add" /></button>
         <button class="icon-btn" disabled={!store.player || !current} aria-label="Play {song.title} next" title="Play next" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace }, 0)}><Icon name="next" /></button>
+        <AddToPlaylist library={song.library} songs={[song.id]} title={song.title} {namespace} />
+        {#if onremove}<button class="icon-btn" disabled={!current} aria-label="Remove {song.title} from this playlist" title="Remove from playlist" onclick={() => onremove(i, song)}><Icon name="remove" /></button>{/if}
         <SongRating library={song.library} songId={song.id} title={song.title} {namespace} />
       </div>
     </li>
@@ -55,5 +61,5 @@
   li { cursor: grab; }
   .similarity { flex: none; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
   .actions { display: flex; align-items: center; }
-  @media (max-width: 480px) { .row-number, .row-duration { display: none; } .actions.sonic { flex-wrap: wrap; justify-content: flex-end; max-width: 8.5rem; } }
+  @media (max-width: 480px) { .row-number, .row-duration { display: none; } .actions { flex-wrap: wrap; justify-content: flex-end; max-width: 8.5rem; } }
 </style>

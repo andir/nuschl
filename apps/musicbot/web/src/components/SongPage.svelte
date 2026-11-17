@@ -10,6 +10,8 @@
   import SongList from "./SongList.svelte";
   import SongRating from "./SongRating.svelte";
   import Icon from "./Icon.svelte";
+  import AddToPlaylist from "./AddToPlaylist.svelte";
+  import FavoriteHeart from "./FavoriteHeart.svelte";
 
   /** `data` is the `api/song` response; `current` says whether `namespace` still holds. */
   let { data, namespace, current } = $props();
@@ -52,6 +54,8 @@
     <div class="detail-actions">
       <button class="btn primary" disabled={!current || !store.player} onclick={() => store.add(store.selected, item)}><Icon name="add" /> Add to queue</button>
       <button class="btn" disabled={!current || !store.player} onclick={() => store.add(store.selected, item, 0)}><Icon name="next" /> Play next</button>
+      <FavoriteHeart library={song.library} songId={song.id} title={song.title} {namespace} />
+      <AddToPlaylist library={song.library} songs={[song.id]} title={song.title} {namespace} />
       {#if sonic && pathFrom !== null}
         <a class="action-link" draggable="false" href={buildRoute({ view: "path", library: song.library, from: pathFrom, to: song.id, namespace })} title="Songs that lead from the one playing now to this one, picked by how they sound"><Icon name="path" size={18} /> Blend into this song</a>
       {/if}

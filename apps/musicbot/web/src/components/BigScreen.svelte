@@ -9,6 +9,7 @@
   import Progress from "./Progress.svelte";
   import SongRating from "./SongRating.svelte";
   import BrowserListen from "./BrowserListen.svelte";
+  import FavoriteHeart from "./FavoriteHeart.svelte";
   import { playerStatus } from "./PlayerBar.svelte";
 
   // `onclose(navigated)`: navigated is true when a link or history step moved to another page.
@@ -118,7 +119,10 @@
               {:else}{track.album}{/if}
             </div>
           {/if}
-          <div class="rating"><SongRating library={track.library} songId={track.id} title={track.title} namespace={store.browseKey} large /></div>
+          <div class="rating">
+            <SongRating library={track.library} songId={track.id} title={track.title} namespace={store.browseKey} large />
+            <FavoriteHeart library={track.library} songId={track.id} title={track.title} namespace={store.browseKey} size={32} />
+          </div>
         {:else}
           <h2 class="title muted">Nothing is playing</h2>
         {/if}
@@ -209,7 +213,8 @@
   .title { margin: 0; font-size: clamp(1.6rem, 3.5vw, 3.25rem); line-height: 1.15; overflow-wrap: anywhere; }
   .title a:not(:hover), .sub a:not(:hover) { color: inherit; }
   .sub { font-size: clamp(1rem, 1.8vw, 1.5rem); color: var(--muted); overflow-wrap: anywhere; }
-  .rating { margin-top: 0.4rem; }
+  .rating { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.4rem; }
+  .rating :global(.heart) { width: 3rem; height: 3rem; }
 
   .controls { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 1rem; }
   .controls-start { display: flex; justify-content: flex-end; min-width: 0; }

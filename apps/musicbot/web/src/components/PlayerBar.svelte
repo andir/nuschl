@@ -25,6 +25,8 @@
   import DuckingPanel from "./DuckingPanel.svelte";
   import SongRating from "./SongRating.svelte";
   import BrowserListen from "./BrowserListen.svelte";
+  import FavoriteHeart from "./FavoriteHeart.svelte";
+  import AddToPlaylist from "./AddToPlaylist.svelte";
 
   let { onexpand } = $props();
   const index = $derived(store.selected);
@@ -84,6 +86,10 @@
             {:else}{track.album}{/if}
           </div>
         {/if}
+      </div>
+      <div class="song-actions">
+        <FavoriteHeart library={track.library} songId={track.id} title={track.title} namespace={store.browseKey} />
+        <AddToPlaylist library={track.library} songs={[track.id]} title={track.title} namespace={store.browseKey} up />
       </div>
     {:else}
       <Cover library={0} art={null} px={56} />
@@ -153,6 +159,7 @@
   .player.dropping { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
   .song { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
   .text { min-width: 0; line-height: 1.3; }
+  .song-actions { display: flex; flex: none; align-items: center; margin-left: auto; }
   .title { font-weight: 600; }
   .title, .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sub { font-size: 0.85rem; color: var(--muted); }

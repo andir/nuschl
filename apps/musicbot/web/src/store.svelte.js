@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 // Live state from the bot, the commands that change it, and the client-side
 // guesses (optimistic values) shown until the server confirms them.
-import { getJSON, postJSON, HttpError } from "./api.js";
+import { getJSON, postForJSON, postJSON, HttpError } from "./api.js";
 import { addressRoute, adoptSharedRoute, applyMove, browseItemIsCurrent, clamp, debounce, libraryForNamespace, parseRoute, queueStorageKey, routeForLibrary, routeForNamespace, seekSettled, selectedQueue } from "./logic.js";
 
 const storageKey = queueStorageKey(location.pathname);
@@ -160,6 +160,39 @@ class Store {
   /** True when the latest state says library `library` supports OpenSubsonic sonic similarity. */
   supportsSonic(library) {
     return this.snapshot?.sonic?.[library] === true;
+  }
+
+  /** True when the viewer's Mumble client has a certificate: they may own, edit and favorite playlists. */
+  get canOwnPlaylists() {
+    return this.snapshot?.playlists?.can_own === true;
+  }
+
+  /** Advances whenever anybody changes a personal playlist. */
+  get playlistRevision() {
+    return this.snapshot?.playlists?.revision ?? 0;
+  }
+
+  /**
+   * Sends a playlist change to `path` for `body.library` in `namespace`. Returns the
+   * JSON reply with `reply`, otherwise true; null after showing why it failed.
+   * Changing the library or reconnecting aborts it.
+   */
+  async playlistChange(path, body, namespace, { reply = false } = {}) {
+    if (!this.browseItemCurrent({ library: body.library, namespace })) {
+      this.toast("The library changed or is reconnecting. Try again once it has loaded.");
+      return null;
+    }
+    const signal = this.browseSignal;
+    try {
+      if (reply) return await postForJSON(path, body, signal);
+      await postJSON(path, body, signal);
+      return true;
+    } catch (error) {
+      if (signal?.aborted) return null;
+      this.#checkInvalid(error);
+      this.toast(error instanceof Error ? error.message : String(error));
+      return null;
+    }
   }
 
   #connect() {

@@ -8,6 +8,7 @@ import {
   mergeHistory, libraryForNamespace, routeForNamespace, browseItemIsCurrent, similarityPercent, sonicPathStart,
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
+  groupPlaylists, editablePlaylists,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -542,4 +543,21 @@ test("song routes keep the namespace in memory and the library key in the addres
   assert.deepEqual(adoptSharedRoute(parsed, ["main01"], "receiver:0"), { view: "albums", library: 0, list: "newest" });
   assert.deepEqual(routeForNamespace(adopted, 0, "receiver:1"), { view: "albums", library: 0, list: "newest" });
   assert.deepEqual(routeForNamespace(parseRoute("#/song/0/s1"), 0, "receiver:0"), { view: "albums", library: 0, list: "newest" });
+});
+
+test("playlists group into the caller's own, other people's and the library's", () => {
+  const playlist = (id, fields = {}) => ({ id, name: id, personal: false, mine: false, favorites: false, shared: false, editable: false, ...fields });
+  const list = [
+    playlist("lib-b"), playlist("zebra", { personal: true, mine: true, editable: true }),
+    playlist("bob-shared", { personal: true, shared: true, editable: true }), playlist("lib-a"),
+    playlist("fav", { personal: true, mine: true, favorites: true, editable: true }),
+    playlist("alpha", { personal: true, mine: true, editable: true }), playlist("ada-private", { personal: true }),
+  ];
+  const groups = groupPlaylists(list);
+  assert.deepEqual(groups.mine.map((item) => item.id), ["fav", "alpha", "zebra"]);
+  assert.deepEqual(groups.others.map((item) => item.id), ["ada-private", "bob-shared"]);
+  assert.deepEqual(groups.library.map((item) => item.id), ["lib-b", "lib-a"]);
+  assert.deepEqual(editablePlaylists(list).map((item) => item.id), ["fav", "alpha", "zebra", "bob-shared"]);
+  assert.deepEqual(groupPlaylists(null), { mine: [], others: [], library: [] });
+  assert.deepEqual(editablePlaylists(undefined), []);
 });
