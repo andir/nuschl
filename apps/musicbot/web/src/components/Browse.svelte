@@ -3,7 +3,7 @@
   import { store } from "../store.svelte.js";
   import { resource } from "../resource.svelte.js";
   import { query } from "../api.js";
-  import { ALBUM_LISTS, buildRoute, formatDuration, shareRoute, shareUrl, totalDuration } from "../logic.js";
+  import { ALBUM_LISTS, artistJumps, buildRoute, formatDuration, shareRoute, shareUrl, totalDuration } from "../logic.js";
   import { startItemDrag } from "../dnd.js";
   import Cover from "./Cover.svelte";
   import MediaCard from "./MediaCard.svelte";
@@ -80,6 +80,17 @@
   function removeSong(index, song) {
     store.playlistChange("api/playlists/remove", { library: detail.library, id: detail.id, index, song: song.id }, namespace);
   }
+
+  const jumps = $derived(route.view === "artists" ? artistJumps(data?.groups) : []);
+  let jumpHeight = $state(0);
+  const groupId = (index) => `artist-group-${index}`;
+
+  // Element ids and scrollIntoView keep the page's route in the address bar.
+  function jump(index) {
+    const heading = document.getElementById(groupId(index));
+    heading?.scrollIntoView({ block: "start" });
+    heading?.focus({ preventScroll: true });
+  }
 </script>
 
 <section class="browse" aria-labelledby="browse-title" aria-busy={result.loading}>
@@ -133,9 +144,16 @@
         </div>
       {/if}
     {:else if route.view === "artists"}
+      {#if jumps.length > 1}
+        <nav class="jump" aria-label="Jump to artists by initial" bind:offsetHeight={jumpHeight}>
+          {#each jumps as entry (entry.index)}
+            <button class="pill" onclick={() => jump(entry.index)} aria-label="Artists under {entry.name}">{entry.name}</button>
+          {/each}
+        </nav>
+      {/if}
       {#each data.groups as group, i (i)}
         <section class="group" aria-label={group.name}>
-          <h2>{group.name}</h2>
+          <h2 id={groupId(i)} class="group-heading" tabindex="-1" style:scroll-margin-top="{jumpHeight + 12}px">{group.name}</h2>
           <div class="media-grid">{#each group.artists as artist (artist.id)}<MediaCard item={artist} kind="artist" {namespace} />{/each}</div>
         </section>
       {/each}
@@ -236,8 +254,17 @@
   .pagination { display: flex; align-items: center; justify-content: center; gap: 1rem; margin: 0 0 1.25rem; font-variant-numeric: tabular-nums; }
   .pagination.bottom { margin: 1.5rem 0 0; }
   .group { margin-bottom: 2rem; }
+  .jump { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0 0 0.5rem; padding: 0.5rem 0; background: var(--bg); }
+  .jump .pill { justify-content: center; min-width: 2.2rem; min-height: 2rem; font-weight: 600; color: var(--fg); }
+  .jump .pill:hover { border-color: var(--accent); color: var(--accent); }
+  .group-heading:focus { outline: none; }
+  .group-heading:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .metadata { display: flex; flex-wrap: wrap; gap: 0 0.75rem; font-variant-numeric: tabular-nums; }
   .badges { display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .sonic-header { margin: 0 0 1.25rem; }
-  @media (max-width: 600px) { .detail-actions { flex-direction: column; align-items: flex-start; } }
+  @media (max-width: 600px) {
+    .detail-actions { flex-direction: column; align-items: flex-start; }
+    .jump { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+    .jump .pill { flex: none; }
+  }
 </style>

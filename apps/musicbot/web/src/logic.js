@@ -513,3 +513,9 @@ export function lyricLineAt(lines, ms) {
   }
   return low - 1;
 }
+
+/** The Artists page's jump targets: name and index of every group that has artists. */
+export function artistJumps(groups) {
+  return (Array.isArray(groups) ? groups : []).flatMap((group, index) =>
+    Array.isArray(group?.artists) && group.artists.length ? [{ name: String(group.name), index }] : []);
+}

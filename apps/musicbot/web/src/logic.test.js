@@ -8,7 +8,7 @@ import {
   mergeHistory, libraryForNamespace, routeForNamespace, browseItemIsCurrent, similarityPercent, sonicPathStart,
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
-  groupPlaylists, editablePlaylists, lyricLineAt,
+  groupPlaylists, editablePlaylists, lyricLineAt, artistJumps,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -572,4 +572,11 @@ test("the sung lyric line is the last one begun", () => {
   assert.equal(lyricLineAt([], 5), -1);
   assert.equal(lyricLineAt(null, 5), -1);
   assert.equal(lyricLineAt(lines, NaN), -1);
+});
+
+test("artist jumps name every group with artists by its position", () => {
+  const groups = [{ name: "#", artists: [{ id: "1" }] }, { name: "A", artists: [] }, { name: "B", artists: [{ id: "2" }] }, { name: "Z", artists: [{ id: "3" }] }];
+  assert.deepEqual(artistJumps(groups), [{ name: "#", index: 0 }, { name: "B", index: 2 }, { name: "Z", index: 3 }]);
+  assert.deepEqual(artistJumps([{ name: "C" }]), []);
+  assert.deepEqual(artistJumps(null), []);
 });
