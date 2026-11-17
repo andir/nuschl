@@ -18,6 +18,11 @@ const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// OpenSubsonic extension names (`getOpenSubsonicExtensions`).
 const TRANSCODING: &str = "transcoding";
 const SONIC_SIMILARITY: &str = "sonicSimilarity";
+const SONG_LYRICS: &str = "songLyrics";
+/// Lyric lines kept from one reply.
+pub const MAX_LYRIC_LINES: usize = 2000;
+/// Characters kept of one lyric line.
+pub const MAX_LYRIC_LINE_CHARS: usize = 500;
 /// Songs asked for and kept from `getSonicSimilarTracks`.
 pub const SONIC_SIMILAR_COUNT: usize = 25;
 /// The most songs asked for and kept from `findSonicPath`, both ends included.
@@ -493,6 +498,32 @@ impl Library {
         Ok((song.track(self.index), details))
     }
 
+    /// The song's lyrics, `None` when the library has none. Libraries with the
+    /// OpenSubsonic `songLyrics` extension are asked by song id and may answer
+    /// with timed lines; others by the song's artist and title, as plain text.
+    pub fn lyrics(&self, id: &str) -> Result<Option<Lyrics>, Error> {
+        let not_found = |result: Result<Reply, Error>| match result {
+            Err(Error::Api { code: 70, .. }) => Ok(None),
+            other => other.map(Some),
+        };
+        if self.has_extension(SONG_LYRICS) {
+            let reply = not_found(self.call(self.get("getLyricsBySongId").query("id", id)))?;
+            return Ok(reply
+                .and_then(|reply| reply.lyrics_list)
+                .and_then(|list| structured_lyrics(list.structured_lyrics)));
+        }
+        let song = self.song(id)?;
+        let mut request = self.get("getLyrics").query("title", &song.title);
+        if let Some(artist) = &song.artist {
+            request = request.query("artist", artist);
+        }
+        let reply = not_found(self.call(request))?;
+        Ok(reply
+            .and_then(|reply| reply.lyrics)
+            .and_then(|lyrics| lyrics.value)
+            .and_then(|text| plain_lyrics(&text)))
+    }
+
     /// One track per album with a song of the same title and artist as
     /// `song`, its own album first. Search finds candidates by title, the
     /// only field every server searches.
@@ -959,6 +990,126 @@ struct Reply {
     transcode_decision: Option<TranscodeDecision>,
     #[serde(default)]
     sonic_match: Vec<SonicMatchEntry>,
+    lyrics: Option<PlainLyrics>,
+    lyrics_list: Option<LyricsList>,
+}
+
+/// A song's lyrics as the page shows them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Lyrics {
+    /// Every line has a start time.
+    pub synced: bool,
+    pub lang: Option<String>,
+    pub lines: Vec<LyricLine>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LyricLine {
+    /// When the line begins, in ms from the start of the song; only in synced lyrics.
+    pub start_ms: Option<u64>,
+    pub text: String,
+}
+
+#[derive(Deserialize)]
+struct PlainLyrics {
+    value: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsList {
+    #[serde(default)]
+    structured_lyrics: Vec<StructuredLyrics>,
+}
+
+#[derive(Deserialize)]
+struct StructuredLyrics {
+    lang: Option<String>,
+    #[serde(default)]
+    synced: bool,
+    /// Milliseconds; positive shows every line sooner.
+    offset: Option<f64>,
+    #[serde(default)]
+    line: Vec<StructuredLine>,
+}
+
+#[derive(Deserialize)]
+struct StructuredLine {
+    start: Option<f64>,
+    #[serde(default)]
+    value: String,
+}
+
+/// One line of lyrics text: control characters go and long lines are cut.
+fn lyric_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .take(MAX_LYRIC_LINE_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+/// The first synced lyrics with a line, otherwise the first unsynced ones.
+/// Synced lines are ordered by start; the offset applies to every line.
+fn structured_lyrics(all: Vec<StructuredLyrics>) -> Option<Lyrics> {
+    let usable =
+        |lyrics: &StructuredLyrics| lyrics.line.iter().any(|line| !line.value.trim().is_empty());
+    let pick = all
+        .iter()
+        .position(|lyrics| lyrics.synced && usable(lyrics))
+        .or_else(|| all.iter().position(usable))?;
+    let chosen = all.into_iter().nth(pick)?;
+    let offset = chosen
+        .offset
+        .filter(|offset| offset.is_finite())
+        .unwrap_or(0.0);
+    let start = |line: &StructuredLine| {
+        line.start
+            .filter(|start| start.is_finite())
+            .map(|start| (start - offset).clamp(0.0, u64::MAX as f64) as u64)
+    };
+    let synced = chosen.synced && chosen.line.iter().all(|line| start(line).is_some());
+    let mut lines: Vec<LyricLine> = chosen
+        .line
+        .iter()
+        .take(MAX_LYRIC_LINES)
+        .map(|line| LyricLine {
+            start_ms: if synced { start(line) } else { None },
+            text: lyric_text(&line.value),
+        })
+        .collect();
+    if synced {
+        lines.sort_by_key(|line| line.start_ms);
+    }
+    Some(Lyrics {
+        synced,
+        lang: chosen
+            .lang
+            .map(|lang| lyric_text(&lang).chars().take(16).collect())
+            .filter(|lang: &String| !lang.is_empty() && lang != "xxx"),
+        lines,
+    })
+}
+
+/// Plain lyrics split into lines; `None` when only blank lines remain.
+fn plain_lyrics(text: &str) -> Option<Lyrics> {
+    let lines: Vec<LyricLine> = text
+        .lines()
+        .take(MAX_LYRIC_LINES)
+        .map(|line| LyricLine {
+            start_ms: None,
+            text: lyric_text(line),
+        })
+        .collect();
+    lines
+        .iter()
+        .any(|line| !line.text.trim().is_empty())
+        .then_some(Lyrics {
+            synced: false,
+            lang: None,
+            lines,
+        })
 }
 
 #[derive(Deserialize)]
@@ -1950,5 +2101,127 @@ pub(crate) mod tests {
         assert_eq!(requests.len(), 3);
         assert!(requests[2].starts_with("GET /rest/deletePlaylist?"));
         assert!(requests[2].contains("&id=p1 "));
+    }
+
+    #[test]
+    fn structured_lyrics_prefer_synced_lines_apply_the_offset_and_stay_bounded() {
+        let body = br#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[
+            {"lang":"xxx","synced":false,"line":[{"value":"plain first"}]},
+            {"lang":"eng","synced":true,"offset":500,"line":[
+                {"start":12000,"value":"second\u0007 line  "},
+                {"start":200,"value":"first line"},
+                {"start":30000.5,"value":""}]}]}}}"#;
+        let list = parse_reply(body).unwrap().lyrics_list.unwrap();
+        let lyrics = structured_lyrics(list.structured_lyrics).unwrap();
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.lang.as_deref(), Some("eng"));
+        let lines: Vec<_> = lyrics
+            .lines
+            .iter()
+            .map(|line| (line.start_ms, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Some(0), "first line"),
+                (Some(11500), "second line"),
+                (Some(29500), "")
+            ]
+        );
+
+        // Unsynced lyrics, or synced ones with a line lacking its start, have no times.
+        let body = br#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[
+            {"synced":true,"line":[{"start":1,"value":"a"},{"value":"b"}]}]}}}"#;
+        let list = parse_reply(body).unwrap().lyrics_list.unwrap();
+        let lyrics = structured_lyrics(list.structured_lyrics).unwrap();
+        assert!(!lyrics.synced && lyrics.lines.iter().all(|line| line.start_ms.is_none()));
+        assert_eq!(lyrics.lang, None);
+
+        let blank = br#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[
+            {"synced":true,"line":[{"start":1,"value":"  "}]}]}}}"#;
+        let list = parse_reply(blank).unwrap().lyrics_list.unwrap();
+        assert_eq!(structured_lyrics(list.structured_lyrics), None);
+        assert_eq!(structured_lyrics(Vec::new()), None);
+
+        let long = "é".repeat(MAX_LYRIC_LINE_CHARS + 50);
+        let many = format!("{long}\n").repeat(MAX_LYRIC_LINES + 10);
+        let lyrics = plain_lyrics(&many).unwrap();
+        assert_eq!(lyrics.lines.len(), MAX_LYRIC_LINES);
+        assert_eq!(lyrics.lines[0].text.chars().count(), MAX_LYRIC_LINE_CHARS);
+        assert_eq!(plain_lyrics(" \n\r\n\t"), None);
+        let lyrics = plain_lyrics("One\r\nTwo\n").unwrap();
+        assert!(!lyrics.synced);
+        let texts: Vec<_> = lyrics
+            .lines
+            .iter()
+            .map(|line| (line.start_ms, line.text.as_str()))
+            .collect();
+        assert_eq!(texts, [(None, "One"), (None, "Two")]);
+    }
+
+    #[test]
+    fn lyrics_are_asked_by_song_id_with_the_extension_and_by_artist_and_title_without() {
+        for (extension, missing) in [(true, false), (true, true), (false, false), (false, true)] {
+            let server = Server::new(move |request, socket| {
+                let body = if request.starts_with("GET /rest/getOpenSubsonicExtensions") {
+                    if extension {
+                        r#"{"subsonic-response":{"status":"ok","openSubsonicExtensions":[{"name":"songLyrics","versions":[1]}]}}"#
+                    } else {
+                        r#"{"subsonic-response":{"status":"ok","openSubsonicExtensions":[]}}"#
+                    }
+                } else if request.starts_with("GET /rest/getSong") {
+                    r#"{"subsonic-response":{"status":"ok","song":{"id":"s1","title":"Tide & Time","artist":"Waves"}}}"#
+                } else if missing {
+                    r#"{"subsonic-response":{"status":"failed","error":{"code":70,"message":"not found"}}}"#
+                } else if request.starts_with("GET /rest/getLyricsBySongId") {
+                    r#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[{"synced":true,"line":[{"start":0,"value":"Hi"}]}]}}}"#
+                } else {
+                    r#"{"subsonic-response":{"status":"ok","lyrics":{"artist":"Waves","title":"Tide","value":"Hi\nthere"}}}"#
+                };
+                json(socket, body);
+            });
+            let library = library(&server);
+            let lyrics = library.lyrics("s1").unwrap();
+            let lines: Vec<String> = server
+                .requests()
+                .iter()
+                .map(|request| request.lines().next().unwrap().to_owned())
+                .collect();
+            let last = lines.last().unwrap();
+            if missing {
+                assert_eq!(lyrics, None, "{extension}");
+            }
+            if extension {
+                assert_eq!(lines.len(), 2);
+                assert!(last.starts_with("GET /rest/getLyricsBySongId?"), "{last}");
+                assert!(last.ends_with("&id=s1 HTTP/1.1"), "{last}");
+                if !missing {
+                    let lyrics = lyrics.unwrap();
+                    assert!(lyrics.synced && lyrics.lines[0].start_ms == Some(0));
+                }
+            } else {
+                assert_eq!(lines.len(), 3);
+                assert!(lines[1].starts_with("GET /rest/getSong?"));
+                assert!(last.starts_with("GET /rest/getLyrics?"), "{last}");
+                assert!(
+                    last.ends_with("&title=Tide%20%26%20Time&artist=Waves HTTP/1.1"),
+                    "{last}"
+                );
+                if !missing {
+                    let lyrics = lyrics.unwrap();
+                    assert!(!lyrics.synced && lyrics.lines.len() == 2);
+                }
+            }
+        }
+        // Other failures stay errors with the redacted public message.
+        let server = Server::reply(
+            "application/json",
+            br#"{"subsonic-response":{"status":"failed","error":{"code":40,"message":"http://private.example/?apiKey=private-key"}}}"#,
+        );
+        let error = library(&server).lyrics("s1").err().unwrap();
+        assert_eq!(
+            error.public_message(),
+            "the music library rejected the request (error 40)"
+        );
     }
 }

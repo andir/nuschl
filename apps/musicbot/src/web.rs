@@ -10,7 +10,8 @@ use crate::{
     import,
     player::{BrowserSubscription, Ducking, MAX_DUCK_HOLD},
     subsonic::{
-        self, Album, AlbumList, Artist, Library, LibraryIdentity, SongDetails, SonicMatch, Track,
+        self, Album, AlbumList, Artist, Library, LibraryIdentity, Lyrics, SongDetails, SonicMatch,
+        Track,
     },
     tokens::Owner,
 };
@@ -112,6 +113,7 @@ pub fn router(bot: Arc<Bot>) -> Router {
         .route("/u/{token}/api/search", get(search))
         .route("/u/{token}/api/song", get(song))
         .route("/u/{token}/api/similar", get(similar))
+        .route("/u/{token}/api/lyrics", get(lyrics))
         .route("/u/{token}/api/path", get(sonic_path))
         .route("/u/{token}/api/forget", post(forget))
         .route("/u/{token}/api/import/search", get(import_search))
@@ -1619,6 +1621,25 @@ async fn song(
     })
     .await?;
     Ok(Json(view))
+}
+
+#[derive(Serialize)]
+struct LyricsView {
+    lyrics: Option<Lyrics>,
+}
+
+/// A song's lyrics, null when the library has none.
+async fn lyrics(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<ItemQuery>,
+) -> Result<Json<LyricsView>, ApiError> {
+    owner(&bot, &token)?;
+    let lyrics = ask(&bot, query.library, move |library| {
+        library.lyrics(&query.id)
+    })
+    .await?;
+    Ok(Json(LyricsView { lyrics }))
 }
 
 #[derive(Serialize)]
@@ -3710,6 +3731,56 @@ mod tests {
         }
         assert_eq!(failing.requests().len(), asked);
         drop(occupied);
+    }
+
+    #[tokio::test]
+    async fn lyrics_answer_the_lines_or_null() {
+        let _exclusive = API_TESTS.lock().await;
+        let server = Server::new(|request, socket| {
+            use std::io::Write;
+            let body = if request.starts_with("GET /rest/getOpenSubsonicExtensions") {
+                r#"{"subsonic-response":{"status":"ok","openSubsonicExtensions":[{"name":"songLyrics","versions":[1]}]}}"#
+            } else if request.contains("&id=s1 ") {
+                r#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[{"lang":"eng","synced":true,"line":[{"start":1500,"value":"Hello"}]}]}}}"#
+            } else {
+                r#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[]}}}"#
+            };
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let (_directory, bot, token) = test_bot(&server.url, 1);
+        let ask = |id: &str| {
+            lyrics(
+                State(bot.clone()),
+                Path(token.clone()),
+                Query(ItemQuery {
+                    library: 0,
+                    id: id.into(),
+                }),
+            )
+        };
+        let found = ask("s1").await.ok().unwrap();
+        assert_eq!(
+            serde_json::to_value(&found.0).unwrap(),
+            serde_json::json!({"lyrics": {"synced": true, "lang": "eng",
+                "lines": [{"start_ms": 1500, "text": "Hello"}]}})
+        );
+        let none = ask("s2").await.ok().unwrap();
+        assert_eq!(
+            serde_json::to_value(&none.0).unwrap(),
+            serde_json::json!({"lyrics": null})
+        );
+        let missing = lyrics(
+            State(bot.clone()),
+            Path(Uuid::nil().to_string()),
+            Query(ItemQuery {
+                library: 0,
+                id: "s1".into(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
     }
 
     #[test]
