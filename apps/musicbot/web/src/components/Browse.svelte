@@ -220,7 +220,7 @@
         <div class="media-grid">{#each data.albums as album (album.id)}<MediaCard item={album} {namespace} />{/each}</div>
         {#if !data.albums.length}<p class="notice muted">No albums by this artist.</p>{/if}
       {:else}
-        <SongList {songs} {namespace} covers={route.view === "playlist"} onremove={route.view === "playlist" && detail.editable ? removeSong : null} />
+        <SongList {songs} {namespace} covers={route.view === "playlist"} positions={route.view === "playlist"} onremove={route.view === "playlist" && detail.editable ? removeSong : null} />
         {#if !songs.length}<p class="notice muted">No tracks here.</p>{/if}
       {/if}
     {/if}
