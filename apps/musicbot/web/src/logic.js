@@ -316,6 +316,19 @@ export function similarityPercent(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? Math.round(value * 100) : null;
 }
 
+/** Failed loads of one cover after which it stays a placeholder. */
+export const COVER_RETRIES = 6;
+
+/**
+ * Milliseconds to wait before loading a cover again after `failures` failed
+ * loads: doubling from 250 up to 5 s (the bot refuses covers while its
+ * artwork worker is busy), or null once it has failed `COVER_RETRIES` times.
+ */
+export function coverRetryDelay(failures) {
+  if (!Number.isInteger(failures) || failures < 1 || failures > COVER_RETRIES) return null;
+  return Math.min(5000, 250 * 2 ** (failures - 1));
+}
+
 /** The now-playing track id a sonic path to `song` can start from, or null when there is no such path. */
 export function sonicPathStart(playing, song) {
   return playing && song && playing.library === song.library && typeof playing.id === "string" && playing.id !== "" && playing.id !== song.id ? playing.id : null;

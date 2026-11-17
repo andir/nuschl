@@ -702,9 +702,12 @@ and `id`. The authenticated `art/<library>/<id>?size=…&v=…` route returns
 only `IHDR`, `IDAT` and `IEND`). Covers are made in
 edge lengths of 32, 64, 96, 128, 200, 300 and 400 pixels; a request gets the
 largest of these that is no larger than its `size`, so the page's few sizes share
-cache entries and worker jobs. Invalid images return 404, busy workers
-(two jobs) or a missing worker return 503. Library failures preserve the existing
-redacted errors.
+cache entries and worker jobs. Invalid images return 404. Two covers are made at a
+time; up to 64 more wait for a job for up to 10 seconds, and a cover another
+request finished meanwhile comes from the cache. A request beyond those 64, one
+still waiting after 10 seconds, or a missing worker gets 503. The page loads a
+failed cover again after 0.25, 0.5, 1, 2, 4 and 5 seconds, then shows the
+placeholder. Library failures preserve the existing redacted errors.
 
 Successful answers are kept on disk in `covers/` below the state directory, up to
 `web.cover_cache_mib` MiB (64 by default, at most 4096; 0 turns the cache off and

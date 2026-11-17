@@ -7,7 +7,7 @@ import {
   queueStorageKey, selectedQueue, encodeDragItem, decodeDragItem, handlesSpace,
   mergeHistory, libraryForNamespace, routeForNamespace, browseItemIsCurrent, similarityPercent, sonicPathStart,
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
-  isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText,
+  isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -280,6 +280,14 @@ test("sonic routes never carry old song IDs into a restarted or remapped namespa
     assert.deepEqual(routeForNamespace(parseRoute(buildRoute(unproved)), 1, namespace), { view: "queue" });
     assert.deepEqual(routeForNamespace(route, 0, "page-a:0"), { view: "queue" });
   }
+});
+
+test("cover retries double up to five seconds and then stop", () => {
+  const delays = Array.from({ length: COVER_RETRIES }, (_, index) => coverRetryDelay(index + 1));
+  assert.deepEqual(delays, [250, 500, 1000, 2000, 4000, 5000]);
+  assert.equal(coverRetryDelay(COVER_RETRIES + 1), null);
+  assert.equal(coverRetryDelay(0), null);
+  assert.equal(coverRetryDelay(1.5), null);
 });
 
 test("similarity percent hides unknown scores", () => {
