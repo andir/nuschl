@@ -48,8 +48,9 @@ browsers. People control what plays on a web page; they get their link by writin
   and failed helpers show a placeholder.
   Finished covers are kept on disk in the state directory (`web.cover_cache_mib`,
   64 MiB by default, each for at most a day), so the library and the worker see
-  each cover and size once a day at most, also across restarts. The browser keeps
-  them for a day as well.
+  each cover and size once a day at most, also across restarts. Covers with
+  byte-identical images, such as an album's songs, share one worker job per
+  size. The browser keeps them for a day as well.
 - **Channels.** One Mumble connection per configured channel, each with its own
   client certificate. Every channel starts with its own queue. On the web page a
   channel can play another channel's queue instead: then both hear the same song,
@@ -827,12 +828,22 @@ and `id`. The authenticated `art/<library>/<id>?size=…&v=…` route returns
 only `IHDR`, `IDAT` and `IEND`). Covers are made in
 edge lengths of 32, 64, 96, 128, 200, 300 and 400 pixels; a request gets the
 largest of these that is no larger than its `size`, so the page's few sizes share
-cache entries and worker jobs. Invalid images return 404. Two covers are made at a
-time; up to 64 more wait for a job for up to 10 seconds, and a cover another
-request finished meanwhile comes from the cache. A request beyond those 64, one
-still waiting after 10 seconds, or a missing worker gets 503. The page loads a
-failed cover again after 0.25, 0.5, 1, 2, 4 and 5 seconds, then shows the
-placeholder. Library failures preserve the existing redacted errors.
+cache entries and worker jobs. Invalid images return 404. An uncached cover
+waits up to 10 seconds for one of 4 cover fetches, which have their own
+admission beside the 8 library calls for browsing; a cover another request
+finished meanwhile comes from the cache, otherwise the bot fetches the encoded
+image and takes its SHA-256. A PNG the worker already made from the same bytes
+at the same size comes from memory and is cached under the requested ID too.
+Navidrome gives every song its own cover ID and answers songs without art of
+their own with the album's image, so an album's songs cost one fetch each and
+one worker job together. Memory holds the last 512 such PNGs, at most 32 MiB,
+and the least recently used leave first. Requests with an image that is being
+made wait for that job; others wait up to 10 seconds for one of two jobs. Up to
+64 requests wait for a fetch or a job at once. A request beyond those 64, one
+still waiting after 10 seconds, or a missing worker gets 503, and a job that
+runs longer than 10 seconds gets 504. The page loads a failed cover again after
+0.25, 0.5, 1, 2, 4 and 5 seconds, then shows the placeholder. Library failures
+preserve the existing redacted errors.
 
 Successful answers are kept on disk in `covers/` below the state directory, up to
 `web.cover_cache_mib` MiB (64 by default, at most 4096; 0 turns the cache off and
