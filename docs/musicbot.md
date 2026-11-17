@@ -111,7 +111,7 @@ the browser to the public address, so the key never stays in the address bar.
 The cookie is `SameSite=Lax` and scoped to the public address's path. Over HTTPS
 it is `Secure` and named `__Host-musicbot_link` (at `/`) or
 `__Secure-musicbot_link` (below a path); over plain HTTP it is `musicbot_link`.
-**Forget this browser** in the sidebar deletes it; the link itself stays valid.
+**Forget this browser** at the bottom of every page deletes it; the link itself stays valid.
 A person with a Mumble certificate keeps the same link; `!web new` replaces
 it, and the old one stops working. Without a certificate anybody could use the
 same name later, so every `!web` gives a new link. Links are kept in `tokens.json`
