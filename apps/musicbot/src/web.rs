@@ -52,6 +52,12 @@ static SSE_WATCHERS: Semaphore = Semaphore::const_new(MAX_SSE_WATCHERS);
 /// Includes fetching and the actual isolated worker exit, not HTTP lifetime.
 const MAX_COVER_JOBS: usize = 2;
 static COVER_JOBS: Semaphore = Semaphore::const_new(MAX_COVER_JOBS);
+/// Uncached covers that may wait for a job at once (a page of albums and some);
+/// more are refused at once.
+const MAX_COVER_WAITERS: usize = 64;
+static COVER_WAITERS: Semaphore = Semaphore::const_new(MAX_COVER_WAITERS);
+/// How long an uncached cover waits for a job before it is refused.
+const COVER_WAIT: Duration = Duration::from_secs(10);
 /// Live bodies have their own admission, independent of library metadata calls.
 const MAX_LISTEN_STREAMS: usize = 16;
 static LISTEN_STREAMS: Semaphore = Semaphore::const_new(MAX_LISTEN_STREAMS);
@@ -646,18 +652,29 @@ async fn art(
 
 /// Fetches a cover that is not cached, has the content worker re-encode it,
 /// and caches it, even when the HTTP client has gone by then. `image` fetches
-/// the encoded cover; it runs only once a worker job is admitted.
+/// the encoded cover; it runs only once a worker job is admitted. A request
+/// waits up to [`COVER_WAIT`] for a job, with at most [`MAX_COVER_WAITERS`]
+/// waiting; a cover another request finished meanwhile comes from the cache.
 async fn fetch_cover(
     bot: &Arc<Bot>,
     key: CoverKey,
     image: impl Future<Output = Result<Vec<u8>, ApiError>> + Send + 'static,
 ) -> Result<Bytes, ApiError> {
-    let permit = COVER_JOBS.try_acquire().map_err(|_| {
+    let busy = || {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "the artwork worker is busy".to_owned(),
         )
-    })?;
+    };
+    let waiting = COVER_WAITERS.try_acquire().map_err(|_| busy())?;
+    let permit = tokio::time::timeout(COVER_WAIT, COVER_JOBS.acquire())
+        .await
+        .map_err(|_| busy())?
+        .map_err(|_| busy())?;
+    drop(waiting);
+    if let Some(body) = bot.covers.get(&key).await {
+        return Ok(body);
+    }
     let size = key.2;
     let worker = content_worker_path(&std::env::current_exe().map_err(|_| {
         ApiError(
@@ -2953,16 +2970,54 @@ mod tests {
         }
         let stale = request(Some("0000000000000000")).await.err().unwrap();
         assert_eq!(stale.0, StatusCode::NOT_FOUND);
-        // Not cached and no job free: the library is not asked either.
-        let missing = art(
+        let other = |bot: Arc<Bot>, token: String| {
+            art(
+                State(bot),
+                Path((token, 0, "other".into())),
+                Query(ArtQuery { size: 300, v: None }),
+            )
+        };
+        // Not cached and the waiting room is full: refused at once.
+        let full = COVER_WAITERS
+            .acquire_many(MAX_COVER_WAITERS as u32)
+            .await
+            .unwrap();
+        let refused = other(bot.clone(), token.clone()).await.err().unwrap();
+        assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
+        drop(full);
+        // A miss waits for a job; a cover finished meanwhile comes from the
+        // cache, and the library is not asked.
+        let waiting = tokio::spawn(other(bot.clone(), token.clone()));
+        while COVER_WAITERS.available_permits() == MAX_COVER_WAITERS {
+            tokio::task::yield_now().await;
+        }
+        bot.covers
+            .insert(&(art_key.clone(), "other".into(), 300), &body)
+            .await;
+        drop(jobs);
+        let response = waiting.await.unwrap().ok().unwrap();
+        let served = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(served, body);
+        assert_eq!(COVER_WAITERS.available_permits(), MAX_COVER_WAITERS);
+        // A miss that finds no job within the wait is refused.
+        let jobs = COVER_JOBS
+            .acquire_many(MAX_COVER_JOBS as u32)
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let late = art(
             State(bot.clone()),
-            Path((token.clone(), 0, "other".into())),
+            Path((token.clone(), 0, "late".into())),
             Query(ArtQuery { size: 300, v: None }),
         )
         .await
         .err()
         .unwrap();
-        assert_eq!(missing.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(late.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(started.elapsed() >= COVER_WAIT);
         drop(jobs);
         assert!(server.requests().is_empty());
     }
