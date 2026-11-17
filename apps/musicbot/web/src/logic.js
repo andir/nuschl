@@ -519,3 +519,23 @@ export function artistJumps(groups) {
   return (Array.isArray(groups) ? groups : []).flatMap((group, index) =>
     Array.isArray(group?.artists) && group.artists.length ? [{ name: String(group.name), index }] : []);
 }
+
+/** Shortest text, in characters, the search field asks suggestions for. */
+export const SUGGEST_MIN_CHARS = 2;
+
+/** The text to ask suggestions for: `text` trimmed, or null when it is shorter than `SUGGEST_MIN_CHARS`. */
+export function suggestionQuery(text) {
+  const trimmed = typeof text === "string" ? text.trim() : "";
+  return [...trimmed].length >= SUGGEST_MIN_CHARS ? trimmed : null;
+}
+
+/**
+ * The highlighted suggestion after one step `delta` (+1 down, -1 up) from
+ * `active` in a list of `length`: wraps around, and -1 (nothing) steps to the
+ * first or last item.
+ */
+export function suggestionStep(active, delta, length) {
+  if (!(length > 0)) return -1;
+  if (active < 0 || active >= length) return delta > 0 ? 0 : length - 1;
+  return (active + delta + length) % length;
+}

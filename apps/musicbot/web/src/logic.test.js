@@ -8,7 +8,7 @@ import {
   mergeHistory, libraryForNamespace, routeForNamespace, browseItemIsCurrent, similarityPercent, sonicPathStart,
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
-  groupPlaylists, editablePlaylists, lyricLineAt, artistJumps,
+  groupPlaylists, editablePlaylists, lyricLineAt, artistJumps, suggestionQuery, suggestionStep,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -579,4 +579,23 @@ test("artist jumps name every group with artists by its position", () => {
   assert.deepEqual(artistJumps(groups), [{ name: "#", index: 0 }, { name: "B", index: 2 }, { name: "Z", index: 3 }]);
   assert.deepEqual(artistJumps([{ name: "C" }]), []);
   assert.deepEqual(artistJumps(null), []);
+});
+
+test("suggestions start at two characters of trimmed text", () => {
+  assert.equal(suggestionQuery("  ab "), "ab");
+  assert.equal(suggestionQuery(" a "), null);
+  assert.equal(suggestionQuery("ü"), null);
+  assert.equal(suggestionQuery("😀😀"), "😀😀");
+  assert.equal(suggestionQuery(""), null);
+  assert.equal(suggestionQuery(undefined), null);
+});
+
+test("the highlighted suggestion steps and wraps", () => {
+  assert.equal(suggestionStep(-1, 1, 4), 0);
+  assert.equal(suggestionStep(-1, -1, 4), 3);
+  assert.equal(suggestionStep(3, 1, 4), 0);
+  assert.equal(suggestionStep(0, -1, 4), 3);
+  assert.equal(suggestionStep(1, 1, 4), 2);
+  assert.equal(suggestionStep(7, 1, 4), 0);
+  assert.equal(suggestionStep(0, 1, 0), -1);
 });

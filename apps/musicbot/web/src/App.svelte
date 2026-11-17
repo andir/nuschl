@@ -15,8 +15,8 @@
   import AddMusic from "./components/AddMusic.svelte";
   import AddAlbum from "./components/AddAlbum.svelte";
   import Requests from "./components/Requests.svelte";
+  import SearchField from "./components/SearchField.svelte";
 
-  let search = $state("");
   let bigScreen = $state(false);
   let bigScreenOpener = null;
   let confirmForget = $state(false);
@@ -40,21 +40,12 @@
   $effect(() => {
     if (store.invalid || !store.snapshot) bigScreen = false;
   });
-  $effect(() => {
-    const currentRoute = store.route;
-    if (currentRoute.view === "search") search = currentRoute.q;
-  });
 
   function changeLibrary(event) {
     if (store.browseKey === null) return;
     const library = Number(event.currentTarget.value);
     store.library = library;
     store.navigate(routeForLibrary(route, library));
-  }
-
-  function submitSearch(event) {
-    event.preventDefault();
-    store.navigate({ view: "search", q: search.trim() });
   }
 
   function openBigScreen(event) {
@@ -109,13 +100,7 @@
   <header class="app-header">
     <div class="bar">
       <a class="brand" href={buildRoute({ view: "queue" })}><Icon name="note" size={22} /><span class="brand-name">nuschl musicbot</span></a>
-      {#if !store.invalid}
-        <form class="search-field" role="search" onsubmit={submitSearch}>
-          <label for="library-search" class="visually-hidden">Search all libraries</label>
-          <input id="library-search" type="search" placeholder="Search music" bind:value={search} autocomplete="off" />
-          <button class="icon-btn" type="submit" aria-label="Search"><Icon name="search" size={18} /></button>
-        </form>
-      {/if}
+      {#if !store.invalid}<SearchField />{/if}
       <div class="status-pills">
         {#if store.snapshot && !store.invalid}<span class="pill viewer"><Icon name="artist" size={15} />Listening as {store.snapshot.you}</span>{/if}
         <span class="pill live-status" class:online={store.connection === "open" && !store.invalid} role="status">{store.invalid ? "Link expired" : store.connection === "open" ? "Live" : store.connection === "reconnecting" ? "Reconnecting…" : "Connecting…"}</span>
@@ -207,10 +192,6 @@
   .nav-bar { padding-top: 0; }
   .brand { display: flex; flex: none; align-items: center; gap: 0.5rem; font-size: 1.1rem; font-weight: 700; white-space: nowrap; }
   .brand :global(svg) { color: var(--accent); }
-  .search-field { display: flex; flex: 1; align-items: center; gap: 0.4rem; max-width: 30rem; padding: 0 0.2rem 0 1rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); }
-  .search-field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .search-field input[type="search"] { flex: 1; width: 100%; padding: 0.45rem 0.2rem; border: none; border-radius: 0; background: transparent; box-shadow: none; }
-  .search-field .icon-btn { width: 1.9rem; height: 1.9rem; }
   .status-pills { display: flex; align-items: center; gap: 0.5rem; min-width: 0; margin-left: auto; }
   .viewer { min-width: 0; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
   .live-status { flex: none; color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); border-color: transparent; font-weight: 600; }
