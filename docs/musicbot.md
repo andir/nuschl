@@ -75,6 +75,13 @@ browsers. People control what plays on a web page; they get their link by writin
 - **Ratings.** Click one of the five stars on the playing song, a library track
   or a History entry to save its rating. Click the star for the current rating
   again to clear it. Listeners share the configured library account.
+- **Playlists.** Everyone with a Mumble certificate owns personal playlists:
+  **New playlist** on the Playlists page, an *Add to playlist* menu on songs,
+  albums, the song page and the playing song, and a heart in the player bar, the
+  big screen and the song page for their Favorites. Everyone sees every playlist
+  and queues one song or all of it; the owner renames, shares and deletes, and a
+  shared playlist takes songs from everyone with a certificate. Playlists made in
+  the library itself stay read-only. Details below.
 - **Ducking.** While somebody in a channel speaks, its Mumble music output gets
   quieter (by default to 30 % of its volume) and comes back 0.8 s after the last
   speech. It fades down in about 60 ms and up in about half a second, so nothing
@@ -495,6 +502,60 @@ unchanged request counts during playback, failed writes and explicit recovery,
 and retained backend ratings after a bot restart. Narrow-screen controls were
 also exercised in Chromium.
 
+## Playlists
+
+Personal playlists are real playlists of each library's configured account,
+made with the Subsonic `createPlaylist`, `updatePlaylist` and `deletePlaylist`
+calls and kept private in the library (`public=false`). The bot records who owns
+each one in `playlists.json` in its state directory, a private file it replaces
+atomically:
+
+```json
+{"version":1,"playlists":[{"library":"<library key>","id":"<playlist id>",
+  "owner":"r<32 hex digits>","owner_name":"Ada","shared":false,"favorites":false}]}
+```
+
+`library` is the library's key from `library_keys.json`, `owner` the person's
+pseudonym (see "Requester pseudonyms" under Adding music; the secret in
+`import_requester.key` exists also without an import service) and `owner_name`
+their Mumble name, renewed whenever they change a playlist. Entries of a library
+whose key leaves `library_keys.json` go at the next start, and entries of
+playlists the library no longer lists go when somebody opens the Playlists page.
+
+A playlist lives in the library selected when it was made and takes songs of
+that library only. The page shows your playlists first (Favorites first), then
+other people's with their name and a **Shared** badge, then the library's own.
+
+| Who | View and queue | Add and remove songs | Rename, share, delete |
+| --- | --- | --- | --- |
+| The owner | yes | yes | yes, except Favorites |
+| Others with a certificate | yes | while it is shared | — |
+| People without a certificate | yes | — | — |
+| Anybody, for playlists made in the library | yes | — | — |
+
+People whose Mumble client lacks a certificate share one pseudonym per server, so
+owning playlists needs a certificate; the page explains why its controls are off.
+**Favorites** is a personal playlist per person and library, made by the first
+heart and named "Favorites of <name>". It stays private and keeps its name; its
+owner adds and removes songs. Turning a heart off takes every copy of the song out.
+
+Limits: names have 1 to 100 characters without control characters; a person owns
+at most 50 personal playlists and the bot keeps at most 10,000; a playlist holds
+at most 5,000 songs; one request adds 1 to 500 songs (an album with more is
+refused); song ids have at most 128 bytes. Songs go to the library 100 at a time
+and in at most 4 KiB of encoded ids per request, so request URLs stay short.
+
+Changes of one playlist wait for each other, as do one person's new playlists
+and Favorites; a change waits up to 30 seconds for its turn and then answers 503.
+The lock then moves into the admitted library call, which holds it until the
+library has answered, also when the browser has gone. Removing a song names its
+position and id; the bot reads the playlist again and answers 409 when another
+song is there now. After every change that reached the library, State/SSE
+`playlists.revision` advances and every open playlist view reloads.
+
+Tested against a loopback Subsonic fixture that keeps playlists the way
+Navidrome's API does; a run against a real Navidrome is still open.
+
 ## Backend playback history
 
 The bot uses the standard Subsonic `scrobble` endpoint. After the first successful
@@ -591,8 +652,9 @@ library, without reading the key. On NixOS the key is one of the module's
 **Requester pseudonyms.** The import service learns one stable pseudonym per
 person: `"r"` and the first 32 hexadecimal digits of HMAC-SHA256
 over the Mumble server, a zero byte and the person's certificate hash, keyed with
-a 32-byte secret the bot makes on first use in `import_requester.key` in its
-state directory. People without a certificate share one pseudonym per server. The
+a 32-byte secret the bot makes at its first start in `import_requester.key` in its
+state directory. The same pseudonyms name the owners of personal playlists. People
+without a certificate share one pseudonym per server. The
 bot watches the import list and fetches covers, which every viewer shares, as
 `musicbot`.
 
@@ -687,6 +749,34 @@ State/SSE includes `rating_revision`, advanced only after a successful backend
 write. Visible stars use it to reload the authoritative rating. The counter is
 local to a bot run; ratings are fetched from the library rather than queue or
 history snapshots. After a failed write, **Retry** reloads the current rating.
+
+State/SSE includes `playlists`: `{"revision":N,"can_own":bool}`. `revision`
+advances after every playlist change that reached the library and when owner
+entries change; `can_own` says whether this viewer's Mumble client has a
+certificate. `GET playlists?library=N` returns `{"playlists":[Playlist]}` and
+`GET playlist?library=N&id=ID` returns `{"playlist":Playlist,"songs":[Track]}`,
+where a Playlist has the library's fields (`library`, `id`, `name`, `song_count`,
+`duration`, `owner` (the library account), `cover_art`) and, for this viewer,
+`personal`, `owner_name` (null for library playlists), `mine`, `shared`,
+`favorites`, `editable` (may add and remove songs) and `manageable` (may rename,
+share and delete). The playlist changes are JSON POSTs:
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `playlists/create` | `{"library":N,"name":"…","shared":false}` (`shared` optional) | the new Playlist |
+| `playlists/rename` | `{"library":N,"id":"ID","name":"…"}` | 204 |
+| `playlists/share` | `{"library":N,"id":"ID","shared":bool}` | 204 |
+| `playlists/delete` | `{"library":N,"id":"ID"}` | 204 |
+| `playlists/add` | `{"library":N,"id":"ID"}` with exactly one of `"songs":["ID",…]`, `"album":"ID"` or `"player":N` (the song that queue plays, from the same library) | `{"added":N}` |
+| `playlists/remove` | `{"library":N,"id":"ID","index":N,"song":"ID"}` | 204, or 409 when another song is at `index` |
+| `favorites` | `{"library":N,"id":"song ID","favorite":bool}` | `{"favorite":bool}` |
+
+`GET favorites?library=N&id=ID` returns `{"favorite":bool}`: whether the song is
+in the viewer's Favorites of that library, without a library call while they have
+none. Refusals answer 403 with the reason (no certificate, a library playlist,
+private to its owner, Favorites stays private), invalid names, ids or song counts
+400, full playlists and reached caps 409, a playlist busy for 30 seconds 503,
+and library failures the redacted errors of browsing.
 
 `POST command` accepts JSON tagged by `command`: `pause`, `resume`, `skip`,
 `clear`, `seek` (`position_ms`), `volume`, `ducking`, `remove`, `move`, `add`, and
