@@ -75,6 +75,11 @@ browsers. People control what plays on a web page; they get their link by writin
 - **Ratings.** Click one of the five stars on the playing song, a library track
   or a History entry to save its rating. Click the star for the current rating
   again to clear it. Listeners share the configured library account.
+- **Lyrics.** The song page shows a song's lyrics from the library, and the
+  lyrics button in the player bar opens them on the big screen (where the same
+  button switches between lyrics and the next songs). Timed lyrics follow the
+  music while that song plays in the selected queue; clicking a line plays from
+  there.
 - **Playlists.** Everyone with a Mumble certificate owns personal playlists:
   **New playlist** on the Playlists page, an *Add to playlist* menu on songs,
   albums, the song page and the playing song, and a heart in the player bar, the
@@ -476,6 +481,24 @@ volume zero, independent local mute/volume, pause/seek/skip, queue switching,
 listener release and suspension cleanup. Reference-Opus Mumble output fell to
 the configured speech-ducking level while measured browser output stayed steady.
 
+## Lyrics
+
+The bot asks the library that holds the song. Libraries with the OpenSubsonic
+`songLyrics` extension (Navidrome among them) get `getLyricsBySongId` and may
+answer with timed lines from embedded or sidecar lyrics; the first timed lyrics
+in the answer win, otherwise the first untimed ones. Their `offset` moves every
+line (positive shows lines sooner), and lines are ordered by their start. Other
+libraries get the classic `getLyrics` with the song's artist and title and answer
+plain text. Each line keeps at most 500 characters without control characters,
+and at most 2,000 lines are kept. A library answer of "not found" (error 70)
+means the song has no lyrics.
+
+Timed lyrics highlight the line being sung while the selected queue plays that
+song, using the same position as the progress bar, and keep it in the middle of
+their box. Scrolling the box by hand pauses this for five seconds. Lines are
+buttons that seek there. The highlight follows the position the bot reports;
+Mumble and the browser add their own short delay.
+
 ## Song ratings
 
 Click a star to save one to five stars immediately. Click the star for the current
@@ -833,6 +856,11 @@ the library reports no usable score (OpenSubsonic uses -1 for that). State/SSE
 includes `sonic`, one boolean per library, from the extensions learned at startup;
 the web page offers these actions only where it is true. Libraries without the
 extension answer these endpoints with an error instead of being queried.
+
+`GET lyrics?library=N&id=ID` returns `{"lyrics":{"synced":bool,"lang":"eng"|null,
+"lines":[{"start_ms":N|null,"text":"…"}]}}`, or `{"lyrics":null}` when the
+library has none. `start_ms` is set on every line of synced lyrics and null
+otherwise. Library failures return the redacted errors of browsing.
 
 `add` also accepts `kind: "similar"` with the song in `id`, and `kind: "path"` with
 the start in `id` and the target in `to`. The bot asks the library again when
