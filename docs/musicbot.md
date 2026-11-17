@@ -883,9 +883,11 @@ Navidrome's `search3` matches the start of each word, which suits typing.
 `add` also accepts `kind: "similar"` with the song in `id`, and `kind: "path"` with
 the start in `id` and the target in `to`. The bot asks the library again when
 adding. A path skips its first song when that song is already playing in the queue.
-Adding similar songs leaves out the song itself and every match with a similarity
-of 100%, which are other copies of the same recording, so the same song is not
-queued again and again.
+Similar songs, listed and added, hold each recording once: the song itself, every
+match with a similarity of 100% and every match with its title and artist are left
+out, and of several copies of one recording (the same title and artist, compared
+without case or extra spaces, at most 3 seconds apart in length) the closest match
+stays.
 
 With an import service configured, State/SSE includes `import`:
 `{"library":N,"revision":N}`, the library added albums arrive in and a revision

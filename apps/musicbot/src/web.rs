@@ -1373,9 +1373,10 @@ async fn command(
                 Kind::Album => library.album(&id).map(|(_, songs)| songs),
                 Kind::Playlist => library.playlist(&id).map(|(_, songs)| songs),
                 Kind::Song => library.song(&id).map(|song| vec![song]),
-                Kind::Similar => library
-                    .sonic_similar(&id)
-                    .map(|matches| sonic(without_identical(matches, &id))),
+                Kind::Similar => {
+                    let matches = library.sonic_similar(&id)?;
+                    Ok(sonic(distinct_similar(matches, &library.song(&id)?)))
+                }
                 Kind::Path => library.sonic_path(&id, &to).map(sonic),
             })
             .await?;
@@ -1406,16 +1407,43 @@ async fn command(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Similar songs without those that sound exactly like the seed (other copies
-/// of the same recording) and without the seed itself, so adding them all
-/// does not queue the same song again and again.
-fn without_identical(matches: Vec<SonicMatch>, seed: &str) -> Vec<SonicMatch> {
-    matches
-        .into_iter()
-        .filter(|found| {
-            found.track.id != seed && found.similarity.is_none_or(|score| score < 1.0 - 1e-6)
-        })
-        .collect()
+/// Similar songs, each recording once: the seed, matches with a similarity of
+/// 100% and matches with the seed's title and artist are left out, and of
+/// several copies of one recording (the same song on another album) the
+/// first, closest match stays.
+fn distinct_similar(matches: Vec<SonicMatch>, seed: &Track) -> Vec<SonicMatch> {
+    let mut kept: Vec<SonicMatch> = Vec::with_capacity(matches.len());
+    for found in matches {
+        let identical = found.track.id == seed.id
+            || found.similarity.is_some_and(|score| score >= 1.0 - 1e-6)
+            || same_recording(&found.track, seed)
+            || kept
+                .iter()
+                .any(|earlier| same_recording(&found.track, &earlier.track));
+        if !identical {
+            kept.push(found);
+        }
+    }
+    kept
+}
+
+/// Whether two tracks are copies of one recording: the same title and artist,
+/// compared without case or extra spaces, and lengths at most 3 seconds apart
+/// when both are known.
+fn same_recording(a: &Track, b: &Track) -> bool {
+    fn words(text: Option<&str>) -> String {
+        text.unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    words(Some(&a.title)) == words(Some(&b.title))
+        && words(a.artist.as_deref()) == words(b.artist.as_deref())
+        && match (a.duration, b.duration) {
+            (Some(a), Some(b)) => a.abs_diff(b) <= 3,
+            _ => true,
+        }
 }
 
 /// A path that starts with the song the queue is playing continues it: the
@@ -1662,6 +1690,7 @@ async fn similar(
         Ok((library.song(&query.id)?, matches))
     })
     .await?;
+    let matches = distinct_similar(matches, &song);
     Ok(Json(SimilarView { song, matches }))
 }
 
@@ -3487,23 +3516,54 @@ mod tests {
     }
 
     #[test]
-    fn adding_similar_songs_skips_identical_copies_and_the_seed() {
-        let found = |id: &str, similarity: Option<f64>| SonicMatch {
-            track: fixture_track(id),
-            similarity,
+    fn similar_songs_list_each_recording_once() {
+        let track = |id: &str, title: &str, artist: Option<&str>, duration: Option<u32>| {
+            serde_json::from_value::<Track>(serde_json::json!({
+                "library": 0, "id": id, "title": title, "artist": artist, "duration": duration,
+            }))
+            .unwrap()
         };
+        let found = |track: Track, similarity: Option<f64>| SonicMatch { track, similarity };
+        let seed = track("seed", "Paper Boats", Some("Lumen"), Some(206));
         let matches = vec![
-            found("seed", Some(1.0)),
-            found("copy", Some(1.0)),
-            found("close", Some(0.999)),
-            found("unscored", None),
-            found("far", Some(0.4)),
+            found(seed.clone(), Some(1.0)),
+            found(track("exact", "Other", Some("Lumen"), Some(100)), Some(1.0)),
+            // The seed on a compilation, scored below 100%.
+            found(
+                track("best-of", " paper  BOATS", Some("lumen"), Some(208)),
+                Some(0.97),
+            ),
+            found(
+                track("hours", "Hours", Some("Nightjar"), Some(250)),
+                Some(0.9),
+            ),
+            found(
+                track("hours-live", "Hours (Live)", Some("Nightjar"), Some(280)),
+                Some(0.85),
+            ),
+            found(
+                track("hours-again", "Hours", Some("Nightjar"), Some(252)),
+                Some(0.8),
+            ),
+            found(
+                track("hours-edit", "Hours", Some("Nightjar"), Some(190)),
+                Some(0.75),
+            ),
+            found(track("unscored", "Salt Air", None, None), None),
+            found(track("unscored-copy", "Salt Air", None, Some(200)), None),
+            found(
+                track("cover", "Hours", Some("Someone Else"), Some(250)),
+                Some(0.4),
+            ),
         ];
-        let kept: Vec<_> = without_identical(matches, "seed")
+        let kept: Vec<_> = distinct_similar(matches, &seed)
             .into_iter()
             .map(|found| found.track.id)
             .collect();
-        assert_eq!(kept, ["close", "unscored", "far"]);
+        assert_eq!(
+            kept,
+            ["hours", "hours-live", "hours-edit", "unscored", "cover"]
+        );
     }
 
     /// `open` offers sonic similarity; `plain` does not; `failing` offers it
@@ -3655,16 +3715,16 @@ mod tests {
         .0;
         assert_eq!((found.song.library, found.song.id.as_str()), (1, "s1"));
         let found = serde_json::to_value(&found).unwrap();
-        // The list shows everything the library found.
+        // The list leaves out the song itself and its 100% copy.
         let listed: Vec<_> = found["matches"]
             .as_array()
             .unwrap()
             .iter()
             .map(|found| found["track"]["id"].as_str().unwrap())
             .collect();
-        assert_eq!(listed, ["s1", "s1-copy", "s2"]);
-        assert_eq!(found["matches"][2]["track"]["library"], 1);
-        assert_eq!(found["matches"][2]["similarity"], 0.8);
+        assert_eq!(listed, ["s2"]);
+        assert_eq!(found["matches"][0]["track"]["library"], 1);
+        assert_eq!(found["matches"][0]["similarity"], 0.8);
 
         let path = sonic_path(
             State(bot.clone()),
