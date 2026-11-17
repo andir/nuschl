@@ -36,4 +36,5 @@
   .local-volume { display: flex; align-items: center; min-width: 0; flex: 0 1 6rem; }
   .local-volume input { width: 100%; min-width: 2.5rem; margin: 0; }
   .large .local-volume { flex-basis: 10rem; }
+  .large .icon-btn { width: 3rem; height: 3rem; }
 </style>

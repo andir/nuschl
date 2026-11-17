@@ -155,8 +155,8 @@
       <p class="status" class:error={statusError} role="status" title={status ?? ""}>{status ?? ""}</p>
 
       {#if upcoming.length}
-        <section class="up-next" aria-label="Up next">
-          <h3>Up next</h3>
+        <section class="up-next card" aria-label="Up next">
+          <h3 class="eyebrow">Up next</h3>
           <ol>
             {#each upcoming as entry (entry.id)}
               <li>
@@ -203,12 +203,12 @@
     padding: 1rem 0;
   }
   .art { width: min(68dvh, 42vw); }
-  .art :global(.cover) { border-radius: 12px; box-shadow: var(--shadow); }
+  .art :global(.cover) { border-radius: calc(var(--radius) + 4px); box-shadow: var(--shadow); }
   .info { display: grid; gap: 1.1rem; min-width: 0; }
   .song { display: grid; gap: 0.35rem; min-width: 0; }
   .title { margin: 0; font-size: clamp(1.6rem, 3.5vw, 3.25rem); line-height: 1.15; overflow-wrap: anywhere; }
+  .title a:not(:hover), .sub a:not(:hover) { color: inherit; }
   .sub { font-size: clamp(1rem, 1.8vw, 1.5rem); color: var(--muted); overflow-wrap: anywhere; }
-  .sub a { color: inherit; }
   .rating { margin-top: 0.4rem; }
 
   .controls { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 1rem; }
@@ -221,29 +221,30 @@
     border: none;
     display: grid;
     place-items: center;
-    background: var(--fg);
-    color: var(--bg);
-    cursor: pointer;
+    background: var(--accent);
+    color: var(--accent-fg);
+    box-shadow: var(--shadow);
     flex: none;
   }
-  .play:hover:not(:disabled) { background: var(--fg); filter: brightness(0.9); }
-  .play:disabled { opacity: 0.4; cursor: default; }
+  .play:hover:not(:disabled) { filter: brightness(1.08); }
+  .play:disabled { opacity: 0.4; }
+  .top .icon-btn, .controls-end .icon-btn { width: 3rem; height: 3rem; }
 
   .volume { display: flex; align-items: center; justify-content: center; gap: 0.6rem; color: var(--muted); }
   .volume input { flex: 1; max-width: 16rem; min-width: 0; }
   .status { min-height: 1.5rem; margin: 0; overflow-wrap: anywhere; text-align: center; color: var(--muted); }
   .status.error { color: var(--error); }
 
-  .up-next { border-top: 1px solid var(--border); padding-top: 0.75rem; min-width: 0; }
-  h3 { margin: 0 0 0.5rem; font-size: 1rem; color: var(--muted); }
-  ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
-  li { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+  .up-next { min-width: 0; padding: 0.75rem; }
+  h3 { margin: 0 0 0.5rem 0.25rem; }
+  ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.25rem; }
+  li { display: flex; align-items: center; gap: 0.75rem; min-width: 0; padding: 0.3rem 0.25rem; }
   .entry { flex: 1; min-width: 0; }
   .entry-title, .entry-artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .entry-title { font-weight: 500; }
   .entry-artist, .duration, .more { color: var(--muted); font-size: 0.85rem; }
   .duration { flex: none; font-variant-numeric: tabular-nums; }
-  .more { margin: 0.5rem 0 0; }
+  .more { margin: 0.5rem 0 0 0.25rem; }
 
   /* Portrait (phone, rotated screen) or narrow windows: stacked and centred. */
   @media (orientation: portrait), (max-width: 760px) {
