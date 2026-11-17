@@ -10,8 +10,7 @@ use crate::{
     import,
     player::{BrowserSubscription, Ducking, MAX_DUCK_HOLD},
     subsonic::{
-        self, Album, AlbumList, Artist, Library, LibraryIdentity, Playlist, SongDetails,
-        SonicMatch, Track,
+        self, Album, AlbumList, Artist, Library, LibraryIdentity, SongDetails, SonicMatch, Track,
     },
     tokens::Owner,
 };
@@ -38,6 +37,8 @@ use std::{
 };
 use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
 use uuid::Uuid;
+
+mod playlists;
 
 /// Searches longer than this are cut.
 const MAX_QUERY: usize = 200;
@@ -96,8 +97,18 @@ pub fn router(bot: Arc<Bot>) -> Router {
         .route("/u/{token}/api/album", get(album))
         .route("/u/{token}/api/artists", get(artists))
         .route("/u/{token}/api/artist", get(artist))
-        .route("/u/{token}/api/playlists", get(playlists))
-        .route("/u/{token}/api/playlist", get(playlist))
+        .route("/u/{token}/api/playlists", get(playlists::list))
+        .route("/u/{token}/api/playlist", get(playlists::detail))
+        .route("/u/{token}/api/playlists/create", post(playlists::create))
+        .route("/u/{token}/api/playlists/rename", post(playlists::rename))
+        .route("/u/{token}/api/playlists/share", post(playlists::share))
+        .route("/u/{token}/api/playlists/delete", post(playlists::delete))
+        .route("/u/{token}/api/playlists/add", post(playlists::add))
+        .route("/u/{token}/api/playlists/remove", post(playlists::remove))
+        .route(
+            "/u/{token}/api/favorites",
+            get(playlists::favorite).post(playlists::set_favorite),
+        )
         .route("/u/{token}/api/search", get(search))
         .route("/u/{token}/api/song", get(song))
         .route("/u/{token}/api/similar", get(similar))
@@ -308,6 +319,25 @@ async fn admitted_call<T: Send + 'static, E: Send + 'static>(
     }
 }
 
+/// The library's redacted error for an admitted call that ended without a result.
+fn library_failure(failure: CallFailure<subsonic::Error>) -> ApiError {
+    match failure {
+        CallFailure::Busy => ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the music library is busy".to_owned(),
+        ),
+        CallFailure::Failed(error) => ApiError(StatusCode::BAD_GATEWAY, error.public_message()),
+        CallFailure::Crashed => ApiError(
+            StatusCode::BAD_GATEWAY,
+            "the music library request failed".to_owned(),
+        ),
+        CallFailure::TimedOut => ApiError(
+            StatusCode::BAD_GATEWAY,
+            "the library did not answer in time".to_owned(),
+        ),
+    }
+}
+
 /// An admitted library call with the library's redacted errors.
 async fn blocking_library_call<T: Send + 'static>(
     admission: &'static Semaphore,
@@ -316,21 +346,18 @@ async fn blocking_library_call<T: Send + 'static>(
 ) -> Result<T, ApiError> {
     admitted_call(admission, timeout, call)
         .await
-        .map_err(|failure| match failure {
-            CallFailure::Busy => ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the music library is busy".to_owned(),
-            ),
-            CallFailure::Failed(error) => ApiError(StatusCode::BAD_GATEWAY, error.public_message()),
-            CallFailure::Crashed => ApiError(
-                StatusCode::BAD_GATEWAY,
-                "the music library request failed".to_owned(),
-            ),
-            CallFailure::TimedOut => ApiError(
-                StatusCode::BAD_GATEWAY,
-                "the library did not answer in time".to_owned(),
-            ),
-        })
+        .map_err(library_failure)
+}
+
+fn known_library(bot: &Bot, library: usize) -> Result<(), ApiError> {
+    if library < bot.libraries.len() {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "no such library".to_owned(),
+        ))
+    }
 }
 
 /// Runs a blocking library call with shared process-wide admission.
@@ -339,17 +366,46 @@ async fn ask<T: Send + 'static>(
     library: usize,
     call: impl FnOnce(&Library) -> Result<T, subsonic::Error> + Send + 'static,
 ) -> Result<T, ApiError> {
-    if library >= bot.libraries.len() {
-        return Err(ApiError(
-            StatusCode::BAD_GATEWAY,
-            "no such library".to_owned(),
-        ));
-    }
+    known_library(bot, library)?;
     let libraries = bot.libraries.clone();
     blocking_library_call(&LIBRARY_CALLS, LIBRARY_TIMEOUT, move || {
         call(&libraries[library])
     })
     .await
+}
+
+/// How a checked library call failed: the library's error, or a refusal the
+/// call found while it ran, for example after re-reading what it changes.
+enum Checked {
+    Library(subsonic::Error),
+    Refused(ApiError),
+}
+
+impl From<subsonic::Error> for Checked {
+    fn from(error: subsonic::Error) -> Self {
+        Self::Library(error)
+    }
+}
+
+/// [`ask`] for calls that may refuse with their own status.
+async fn ask_checked<T: Send + 'static>(
+    bot: &Bot,
+    library: usize,
+    call: impl FnOnce(&Library) -> Result<T, Checked> + Send + 'static,
+) -> Result<T, ApiError> {
+    known_library(bot, library)?;
+    let libraries = bot.libraries.clone();
+    admitted_call(&LIBRARY_CALLS, LIBRARY_TIMEOUT, move || {
+        call(&libraries[library])
+    })
+    .await
+    .map_err(|failure| match failure {
+        CallFailure::Failed(Checked::Refused(error)) => error,
+        CallFailure::Failed(Checked::Library(error)) => library_failure(CallFailure::Failed(error)),
+        CallFailure::Busy => library_failure(CallFailure::Busy),
+        CallFailure::Crashed => library_failure(CallFailure::Crashed),
+        CallFailure::TimedOut => library_failure(CallFailure::TimedOut),
+    })
 }
 
 /// The bot's public address: the page for a browser that opened its own link,
@@ -725,9 +781,19 @@ struct StateView {
     players: Vec<PlayerView>,
     channels: Vec<ChannelView>,
     rating_revision: u64,
+    playlists: PlaylistStateView,
     /// Adding music, when configured: the library added albums arrive in and
     /// a revision that advances when the import list changes.
     import: Option<ImportStateView>,
+}
+
+/// Personal playlists: a revision that advances after every change, and
+/// whether this viewer may own and edit playlists (their Mumble client has a
+/// certificate).
+#[derive(Serialize)]
+struct PlaylistStateView {
+    revision: u64,
+    can_own: bool,
 }
 
 #[derive(Serialize)]
@@ -785,7 +851,7 @@ struct ChannelView {
 }
 
 /// Everything the app shows, as one snapshot.
-fn snapshot(bot: &Bot, you: &str) -> StateView {
+fn snapshot(bot: &Bot, you: &Owner) -> StateView {
     let players = bot
         .players
         .iter()
@@ -838,7 +904,7 @@ fn snapshot(bot: &Bot, you: &str) -> StateView {
         })
         .collect();
     StateView {
-        you: you.to_owned(),
+        you: you.name.clone(),
         libraries: bot
             .libraries
             .iter()
@@ -857,6 +923,10 @@ fn snapshot(bot: &Bot, you: &str) -> StateView {
         players,
         channels,
         rating_revision: bot.rating_revision.load(Ordering::SeqCst),
+        playlists: PlaylistStateView {
+            revision: bot.playlists.revision(),
+            can_own: crate::playlists::can_own(you),
+        },
         import: bot.adding.as_ref().map(|adding| ImportStateView {
             library: adding.library,
             revision: adding.revision.load(Ordering::SeqCst),
@@ -869,7 +939,7 @@ async fn state(
     Path(token): Path<String>,
 ) -> Result<Json<StateView>, ApiError> {
     let owner = owner(&bot, &token)?;
-    Ok(Json(snapshot(&bot, &owner.name)))
+    Ok(Json(snapshot(&bot, &owner)))
 }
 
 #[derive(Deserialize)]
@@ -1165,7 +1235,7 @@ fn state_stream(
             let owner = owner(&bot, &token).ok()?;
             let event = Event::default()
                 .event("state")
-                .json_data(snapshot(&bot, &owner.name))
+                .json_data(snapshot(&bot, &owner))
                 .ok()?;
             Some((Ok(event), (bot, token, changes, false, permit)))
         },
@@ -1519,40 +1589,6 @@ async fn artist(
 }
 
 #[derive(Serialize)]
-struct PlaylistList {
-    playlists: Vec<Playlist>,
-}
-
-async fn playlists(
-    State(bot): State<Arc<Bot>>,
-    Path(token): Path<String>,
-    Query(query): Query<LibraryQuery>,
-) -> Result<Json<PlaylistList>, ApiError> {
-    owner(&bot, &token)?;
-    let playlists = ask(&bot, query.library, |library| library.playlists()).await?;
-    Ok(Json(PlaylistList { playlists }))
-}
-
-#[derive(Serialize)]
-struct PlaylistView {
-    playlist: Playlist,
-    songs: Vec<Track>,
-}
-
-async fn playlist(
-    State(bot): State<Arc<Bot>>,
-    Path(token): Path<String>,
-    Query(query): Query<ItemQuery>,
-) -> Result<Json<PlaylistView>, ApiError> {
-    owner(&bot, &token)?;
-    let (playlist, songs) = ask(&bot, query.library, move |library| {
-        library.playlist(&query.id)
-    })
-    .await?;
-    Ok(Json(PlaylistView { playlist, songs }))
-}
-
-#[derive(Serialize)]
 struct SongView {
     song: Track,
     details: SongDetails,
@@ -1761,7 +1797,7 @@ async fn import_search(
     if text.is_empty() {
         return Ok(Json(ImportAlbums { albums: Vec::new() }));
     }
-    let requester = adding.pseudonyms.of(&owner);
+    let requester = bot.pseudonyms.of(&owner);
     let albums = import_call(&adding, move |client| client.search(&requester, &text)).await?;
     Ok(Json(ImportAlbums { albums }))
 }
@@ -1794,7 +1830,7 @@ async fn import_album(
     if !import::valid_id(&query.id) {
         return Err(import_error(import::Failure::NotAvailable));
     }
-    let requester = adding.pseudonyms.of(&owner);
+    let requester = bot.pseudonyms.of(&owner);
     let id = query.id;
     let album = import_call(&adding, move |client| client.album(&requester, &id)).await?;
     let in_library = in_library(&bot, adding.library, &album.album).await;
@@ -1848,7 +1884,7 @@ async fn import_requests(
 ) -> Result<Json<ImportRequests>, ApiError> {
     let owner = owner(&bot, &token)?;
     let adding = adding(&bot)?;
-    let requester = adding.pseudonyms.of(&owner);
+    let requester = bot.pseudonyms.of(&owner);
     let list = import_call(&adding, move |client| client.imports(&requester)).await?;
     Ok(Json(ImportRequests {
         requests: list.imports,
@@ -1882,7 +1918,7 @@ async fn import_request(
     if !import::valid_id(&body.album_id) {
         return Err(import_error(import::Failure::NotAvailable));
     }
-    let requester = adding.pseudonyms.of(&owner);
+    let requester = bot.pseudonyms.of(&owner);
     let album_id = body.album_id;
     let (request, existing) =
         import_call(&adding, move |client| client.request(&requester, &album_id)).await?;
@@ -2292,9 +2328,12 @@ mod tests {
 
     // These API tests share the production admission pool; the overload test
     // deliberately occupies every permit and must not race other API consumers.
-    static API_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(super) static API_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn test_bot(url: &str, library_count: usize) -> (tempfile::TempDir, Arc<Bot>, String) {
+    pub(super) fn test_bot(
+        url: &str,
+        library_count: usize,
+    ) -> (tempfile::TempDir, Arc<Bot>, String) {
         let directory = tempfile::tempdir().unwrap();
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
             "web": { "listen": "127.0.0.1:0", "public_url": "http://localhost/" },
@@ -2313,7 +2352,7 @@ mod tests {
         let libraries = config
             .libraries
             .iter()
-            .zip(keys)
+            .zip(keys.iter().cloned())
             .enumerate()
             .map(|(index, (library, key))| {
                 Library::new(
@@ -2351,6 +2390,12 @@ mod tests {
                 .unwrap(),
             adding: None,
             rating_revision: std::sync::atomic::AtomicU64::new(0),
+            playlists: crate::playlists::Playlists::load(
+                directory.path().join(crate::playlists::FILE),
+                &keys,
+            )
+            .unwrap(),
+            pseudonyms: import::Pseudonyms::load(directory.path()).unwrap(),
         });
         (directory, bot, token)
     }
@@ -2935,7 +2980,8 @@ mod tests {
         );
         let (_directory, bot, token) = test_bot(&server.url, 1);
         let art_key = bot.libraries[0].key().to_owned();
-        assert_eq!(snapshot(&bot, "x").library_keys, [art_key.as_str()]);
+        let viewer = owner(&bot, &token).ok().unwrap();
+        assert_eq!(snapshot(&bot, &viewer).library_keys, [art_key.as_str()]);
         // A 1×1 thumbnail PNG.
         let body = Bytes::from_static(b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x38\x11\xa0\xf1\x1f\x00\x05\x64\x02\x40\x64\x52\x9c\x3a\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82");
         bot.covers
@@ -3383,7 +3429,7 @@ mod tests {
     fn snapshot_reports_only_already_known_sonic_support() {
         let server = sonic_fixture("open");
         let (_directory, bot, token) = test_bot(&server.url, 2);
-        let you = owner(&bot, &token).ok().unwrap().name;
+        let you = owner(&bot, &token).ok().unwrap();
         assert_eq!(snapshot(&bot, &you).sonic, [false, false]);
         assert!(server.requests().is_empty(), "snapshots never ask");
         bot.libraries[1].ping().unwrap();
@@ -3679,8 +3725,9 @@ mod tests {
 
     #[test]
     fn state_has_no_import_without_the_section() {
-        let (_directory, bot, _token) = test_bot("http://unused.invalid", 1);
-        let state = serde_json::to_value(snapshot(&bot, "Listener")).unwrap();
+        let (_directory, bot, token) = test_bot("http://unused.invalid", 1);
+        let viewer = owner(&bot, &token).ok().unwrap();
+        let state = serde_json::to_value(snapshot(&bot, &viewer)).unwrap();
         assert_eq!(state["import"], serde_json::Value::Null);
     }
 
@@ -3787,16 +3834,11 @@ mod tests {
             key_file: directory.path().join("import-key"),
             library: "Library 0".into(),
         };
-        let adding =
-            import::Adding::open(&config, &bot.config.libraries, directory.path()).unwrap();
+        let adding = import::Adding::open(&config, &bot.config.libraries).unwrap();
         Arc::get_mut(&mut bot).unwrap().adding = Some(Arc::new(adding));
-        let requester = bot
-            .adding
-            .as_ref()
-            .unwrap()
-            .pseudonyms
-            .of(&bot.tokens.owner(&token.parse().unwrap()).unwrap());
-        let state = serde_json::to_value(snapshot(&bot, "Listener")).unwrap();
+        let viewer = bot.tokens.owner(&token.parse().unwrap()).unwrap();
+        let requester = bot.pseudonyms.of(&viewer);
+        let state = serde_json::to_value(snapshot(&bot, &viewer)).unwrap();
         assert_eq!(
             state["import"],
             serde_json::json!({"library": 0, "revision": 0})

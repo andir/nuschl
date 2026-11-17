@@ -9,6 +9,7 @@ mod library_keys;
 mod mumble;
 mod persist;
 mod player;
+mod playlists;
 mod scrobble;
 mod subsonic;
 mod tokens;
@@ -63,6 +64,10 @@ pub struct Bot {
     pub changes: Changes,
     /// Ephemeral invalidation for live, backend-owned song ratings.
     pub rating_revision: AtomicU64,
+    /// Who owns which personal playlist, and their change revision.
+    pub playlists: playlists::Playlists,
+    /// Per-person pseudonyms for import requests and playlist owners.
+    pub pseudonyms: import::Pseudonyms,
     /// Serializes checkpoints with the final shutdown save.
     pub persistence: Mutex<()>,
     /// Decoded covers in `covers/` below the state directory.
@@ -136,7 +141,7 @@ async fn run(arguments: Arguments) -> Result<(), String> {
     let libraries = config
         .libraries
         .iter()
-        .zip(keys)
+        .zip(keys.iter().cloned())
         .enumerate()
         .map(|(index, (library, key))| {
             Ok(Library::new(index, library, library.credentials()?, key))
@@ -145,10 +150,12 @@ async fn run(arguments: Arguments) -> Result<(), String> {
     let adding = config
         .import
         .as_ref()
-        .map(|import| {
-            import::Adding::open(import, &config.libraries, &state_directory).map(Arc::new)
-        })
+        .map(|import| import::Adding::open(import, &config.libraries).map(Arc::new))
         .transpose()?;
+    let pseudonyms = import::Pseudonyms::load(&state_directory)
+        .map_err(|error| format!("{}: {error}", import::SECRET_FILE))?;
+    let playlists = playlists::Playlists::load(state_directory.join(playlists::FILE), &keys)
+        .map_err(|error| format!("{}: {error}", playlists::FILE))?;
     let tokens = Tokens::load(state_directory.join("tokens.json"))
         .map_err(|error| format!("tokens.json: {error}"))?;
     let changes = Changes::default();
@@ -199,6 +206,8 @@ async fn run(arguments: Arguments) -> Result<(), String> {
         tokens,
         changes,
         rating_revision: AtomicU64::new(0),
+        playlists,
+        pseudonyms,
         persistence: Mutex::new(()),
         covers,
         adding,
@@ -287,6 +296,8 @@ fn prepare_state_directory(path: &std::path::Path) -> std::io::Result<()> {
         "tokens.json.new",
         "queues.json",
         "queues.json.new",
+        playlists::FILE,
+        "playlists.json.new",
     ] {
         match persist::open_private(&path.join(name)) {
             Ok(_) => {}
@@ -314,6 +325,8 @@ mod state_tests {
             "tokens.json.new",
             "queues.json",
             "queues.json.new",
+            "playlists.json",
+            "playlists.json.new",
         ] {
             let path = root.join(name);
             std::fs::write(&path, b"preserved secret").unwrap();
@@ -337,6 +350,8 @@ mod state_tests {
             "tokens.json.new",
             "queues.json",
             "queues.json.new",
+            "playlists.json",
+            "playlists.json.new",
         ] {
             let path = root.join(name);
             assert_eq!(

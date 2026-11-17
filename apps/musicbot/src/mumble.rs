@@ -832,6 +832,9 @@ certificate_sha256 = "{pin}"
                 covers: crate::covers::CoverCache::disabled(),
                 adding: None,
                 rating_revision: std::sync::atomic::AtomicU64::new(0),
+                playlists: crate::playlists::Playlists::load(directory.join("playlists.json"), &[])
+                    .unwrap(),
+                pseudonyms: crate::import::Pseudonyms::load(directory).unwrap(),
                 config,
             })
         }
