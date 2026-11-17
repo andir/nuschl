@@ -38,13 +38,13 @@
       <div class="actions" class:sonic={sonic(song)}>
         {#if sonic(song)}
           {@const from = sonicPathStart(playing, song)}
-          <a class="icon-button" draggable="false" href={buildRoute({ view: "similar", library: song.library, id: song.id, namespace })} aria-label="Songs similar to {song.title}" title="Similar songs"><Icon name="similar" /></a>
+          <a class="icon-btn" draggable="false" href={buildRoute({ view: "similar", library: song.library, id: song.id, namespace })} aria-label="Songs similar to {song.title}" title="Similar songs"><Icon name="similar" /></a>
           {#if from !== null}
-            <a class="icon-button" draggable="false" href={buildRoute({ view: "path", library: song.library, from, to: song.id, namespace })} aria-label="Blend from now playing into {song.title}" title="Blend into this song"><Icon name="path" /></a>
+            <a class="icon-btn" draggable="false" href={buildRoute({ view: "path", library: song.library, from, to: song.id, namespace })} aria-label="Blend from now playing into {song.title}" title="Blend into this song"><Icon name="path" /></a>
           {/if}
         {/if}
-        <button class="icon-button" disabled={!store.player || !current} aria-label="Add {song.title} to queue" title="Add to queue" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace })}><Icon name="add" /></button>
-        <button class="icon-button" disabled={!store.player || !current} aria-label="Play {song.title} next" title="Play next" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace }, 0)}><Icon name="next" /></button>
+        <button class="icon-btn" disabled={!store.player || !current} aria-label="Add {song.title} to queue" title="Add to queue" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace })}><Icon name="add" /></button>
+        <button class="icon-btn" disabled={!store.player || !current} aria-label="Play {song.title} next" title="Play next" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace }, 0)}><Icon name="next" /></button>
         <SongRating library={song.library} songId={song.id} title={song.title} {namespace} />
       </div>
     </li>
@@ -54,7 +54,7 @@
 <style>
   .song-list { list-style: none; padding: 0; margin: 0; }
   li { display: flex; align-items: center; gap: 0.65rem; min-height: 3.6rem; padding: 0.4rem; border-bottom: 1px solid var(--border); cursor: grab; border-radius: 4px; }
-  li:hover, li:focus-within { background: var(--surface-hover); }
+  li:hover, li:focus-within { background: var(--surface-2); }
   .number { flex: none; width: 2rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
   .description { flex: 1; min-width: 0; }
   .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -63,7 +63,7 @@
   .duration { font-variant-numeric: tabular-nums; font-size: 0.85rem; }
   .similarity { flex: none; font-variant-numeric: tabular-nums; font-size: 0.8rem; }
   .actions { display: flex; }
-  .actions a.icon-button { color: inherit; }
-  .actions a.icon-button:hover { color: var(--accent); }
+  .actions a.icon-btn { color: inherit; }
+  .actions a.icon-btn:hover { color: var(--accent); }
   @media (max-width: 480px) { .number { display: none; } li { gap: 0.4rem; } .duration { display: none; } .actions.sonic { flex-wrap: wrap; justify-content: flex-end; max-width: 8.5rem; } }
 </style>

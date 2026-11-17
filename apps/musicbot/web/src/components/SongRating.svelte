@@ -126,7 +126,7 @@
   .large .star { width: 44px; height: 48px; padding: 4px; }
   .large .star svg { width: 34px; height: 34px; }
   .large .feedback { font-size: 0.9rem; }
-  .star:hover:not(:disabled) { background: var(--surface-hover); }
+  .star:hover:not(:disabled) { background: var(--surface-2); }
   .feedback { display: block; max-width: 15rem; font-size: 0.75rem; overflow-wrap: anywhere; }
   .retry { padding: 0; border: none; background: transparent; color: inherit; text-decoration: underline; font-size: inherit; }
 </style>

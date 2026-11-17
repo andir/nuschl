@@ -80,7 +80,7 @@
       </select>
     </label>
     <p class="muted">Played tracks, newest first. Transmitted time excludes pauses, seeks and waiting for listeners.</p>
-    {#if error}<p class="notice error" role="alert">Could not load history: {error}</p><button onclick={() => load()}>Retry history</button>{/if}
+    {#if error}<p class="notice error" role="alert">Could not load history: {error}</p><button class="btn" onclick={() => load()}>Retry history</button>{/if}
     {#if loading}<p class="muted" role="status">Loading history…</p>{/if}
     {#if loaded && !history.items.length}<p class="notice muted">No playback history for this queue yet.</p>{/if}
     <ol class="history-list" aria-label="Played tracks">
@@ -108,7 +108,7 @@
         </li>
       {/each}
     </ol>
-    {#if history.next_before !== null}<button disabled={loading || !connected} onclick={() => load(true)}>Load older</button>{/if}
+    {#if history.next_before !== null}<button class="btn" disabled={loading || !connected} onclick={() => load(true)}>Load older</button>{/if}
   {:else}<p class="notice muted">No playback queues are configured.</p>{/if}
 </section>
 
@@ -124,7 +124,7 @@
   dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem 1rem; margin: 0.6rem 0 0; font-size: 0.85rem; }
   dt { color: var(--muted); }
   dd { margin: 0; }
-  .failed, .failure { color: var(--danger); }
+  .failed, .failure { color: var(--error); }
   .failure { margin-bottom: 0; font-size: 0.9rem; }
   @media (max-width: 600px) { dl { grid-template-columns: 1fr; } }
 </style>

@@ -104,10 +104,10 @@
         <Icon name={player?.paused ? "play" : "pause"} size={24} />
       </button>
       <div class="controls-end">
-        <button class="icon-button" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
+        <button class="icon-btn" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
           <Icon name="skip" />
         </button>
-        <button class="icon-button" aria-label="Open big screen" aria-haspopup="dialog" title="Big screen" onclick={onexpand}>
+        <button class="icon-btn" aria-label="Open big screen" aria-haspopup="dialog" title="Big screen" onclick={onexpand}>
           <Icon name="expand" />
         </button>
       </div>
@@ -168,14 +168,14 @@
     border: none;
     display: grid;
     place-items: center;
-    background: var(--text);
-    color: var(--background);
+    background: var(--fg);
+    color: var(--bg);
     cursor: pointer;
     flex: none;
   }
   .play:disabled { opacity: 0.4; cursor: default; }
   .status { width: 100%; height: 1.25rem; line-height: 1.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font-size: 0.8rem; color: var(--muted); }
-  .status.error { color: var(--danger); }
+  .status.error { color: var(--error); }
   .side { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 0.5rem; min-width: 0; }
   .queue-select select { max-width: 10rem; }
   .volume { display: flex; align-items: center; gap: 0.35rem; color: var(--muted); }

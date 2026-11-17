@@ -81,11 +81,11 @@
     {/if}
     <div class="top-actions">
       {#if canFullscreen}
-        <button class="icon-button" aria-label="Full screen" aria-pressed={fullscreen} title={fullscreen ? "Leave full screen" : "Full screen"} onclick={toggleFullscreen}>
+        <button class="icon-btn" aria-label="Full screen" aria-pressed={fullscreen} title={fullscreen ? "Leave full screen" : "Full screen"} onclick={toggleFullscreen}>
           <Icon name={fullscreen ? "fullscreen-exit" : "fullscreen"} size={28} />
         </button>
       {/if}
-      <button class="icon-button" aria-label="Close big screen" title="Close (Esc)" onclick={() => onclose(false)}>
+      <button class="icon-btn" aria-label="Close big screen" title="Close (Esc)" onclick={() => onclose(false)}>
         <Icon name="close" size={28} />
       </button>
     </div>
@@ -138,7 +138,7 @@
           <Icon name={player?.paused ? "play" : "pause"} size={40} />
         </button>
         <div class="controls-end">
-          <button class="icon-button" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
+          <button class="icon-btn" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
             <Icon name="skip" size={32} />
           </button>
         </div>
@@ -185,7 +185,7 @@
     flex-direction: column;
     overflow-y: auto;
     padding: clamp(0.75rem, 2.5vw, 2rem);
-    background: var(--background);
+    background: var(--bg);
     outline: none;
   }
   .top { display: flex; flex: none; align-items: center; gap: 0.75rem; }
@@ -221,18 +221,18 @@
     border: none;
     display: grid;
     place-items: center;
-    background: var(--text);
-    color: var(--background);
+    background: var(--fg);
+    color: var(--bg);
     cursor: pointer;
     flex: none;
   }
-  .play:hover:not(:disabled) { background: var(--text); filter: brightness(0.9); }
+  .play:hover:not(:disabled) { background: var(--fg); filter: brightness(0.9); }
   .play:disabled { opacity: 0.4; cursor: default; }
 
   .volume { display: flex; align-items: center; justify-content: center; gap: 0.6rem; color: var(--muted); }
   .volume input { flex: 1; max-width: 16rem; min-width: 0; }
   .status { min-height: 1.5rem; margin: 0; overflow-wrap: anywhere; text-align: center; color: var(--muted); }
-  .status.error { color: var(--danger); }
+  .status.error { color: var(--error); }
 
   .up-next { border-top: 1px solid var(--border); padding-top: 0.75rem; min-width: 0; }
   h3 { margin: 0 0 0.5rem; font-size: 1rem; color: var(--muted); }

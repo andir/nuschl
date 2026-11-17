@@ -29,7 +29,7 @@
     <p class="notice muted" role="status">Requests will update after the connection is restored.</p>
   {:else}
     {#if budget}<p class="budget">{budget}</p>{/if}
-    {#if result.error}<div class="notice error" role="alert"><p>{result.error}</p><button onclick={() => result.reload()}>Try again</button></div>{/if}
+    {#if result.error}<div class="notice error" role="alert"><p>{result.error}</p><button class="btn" onclick={() => result.reload()}>Try again</button></div>{/if}
     {#if result.loading && !data}<p class="notice" role="status">Loading requests…</p>{/if}
     {#if data && !requests.length}<p class="notice muted">No requests yet.</p>{/if}
     <ol class="request-list" aria-label="Requests">
@@ -71,6 +71,6 @@
   .metadata { display: flex; flex-wrap: wrap; gap: 0.7rem; font-size: 0.85rem; margin: 0.4rem 0; }
   .status { margin: 0.4rem 0 0; }
   .status.done { color: var(--accent); }
-  .status.failed { color: var(--danger); }
+  .status.failed { color: var(--error); }
   progress { width: 100%; max-width: 20rem; margin-top: 0.5rem; accent-color: var(--accent); }
 </style>

@@ -60,7 +60,7 @@
   {:else if result.loading}
     <p class="notice" role="status">Loading album…</p>
   {:else if result.error}
-    <div class="notice error" role="alert"><p>{result.error}</p><button onclick={() => result.reload()}>Try again</button></div>
+    <div class="notice error" role="alert"><p>{result.error}</p><button class="btn" onclick={() => result.reload()}>Try again</button></div>
   {:else if album}
     <div class="detail-header">
       <div class="detail-art"><Cover importId={album.has_cover ? album.id : null} size={400} /></div>
@@ -76,7 +76,7 @@
           <p class="in-library" id="in-library-hint">Your library already has an album with this name.{#if libraryLink}{" "}<a href={libraryLink}>Open it in the library</a>{/if}</p>
         {/if}
         <div class="detail-actions">
-          <button class="primary" disabled={!canAdd} aria-describedby={inLibrary ? "in-library-hint" : undefined} onclick={add}><Icon name="add" /> {inLibrary ? "Add anyway" : "Add to library"}</button>
+          <button class="btn primary" disabled={!canAdd} aria-describedby={inLibrary ? "in-library-hint" : undefined} onclick={add}><Icon name="add" /> {inLibrary ? "Add anyway" : "Add to library"}</button>
         </div>
         {#if addError}<p class="notice error" role="alert">{addError}</p>{/if}
         <div class="add-status" role="status">
@@ -118,11 +118,11 @@
   .detail-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .add-status p { margin: 0.5rem 0 0; }
   .add-status a { text-decoration: underline; }
-  .add-status .failed { color: var(--danger); }
+  .add-status .failed { color: var(--error); }
   progress { width: 100%; max-width: 20rem; margin-top: 0.5rem; accent-color: var(--accent); }
   .track-list { list-style: none; padding: 0; margin: 0; }
   li { display: flex; align-items: center; gap: 0.65rem; min-height: 3.6rem; padding: 0.4rem; border-bottom: 1px solid var(--border); border-radius: 4px; }
-  li:hover { background: var(--surface-hover); }
+  li:hover { background: var(--surface-2); }
   .number { flex: none; min-width: 2rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
   .description { flex: 1; min-width: 0; }
   .title, .secondary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

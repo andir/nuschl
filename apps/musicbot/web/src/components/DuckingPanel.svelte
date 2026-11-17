@@ -35,8 +35,8 @@
 
 <div class="ducking" bind:this={root}>
   <button
-    class="icon-button"
-    class:on={ducking?.enabled}
+    class="icon-btn"
+    class:active={ducking?.enabled}
     bind:this={button}
     aria-expanded={open}
     aria-controls="{id}-panel"
@@ -76,7 +76,6 @@
 
 <style>
   .ducking { position: relative; }
-  .on { color: var(--accent); }
   .panel {
     position: absolute;
     right: 0;

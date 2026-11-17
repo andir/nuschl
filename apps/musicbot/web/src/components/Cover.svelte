@@ -49,7 +49,7 @@
 </div>
 
 <style>
-  .cover { position: relative; flex: none; overflow: hidden; border-radius: 6px; background: var(--placeholder); }
+  .cover { position: relative; flex: none; overflow: hidden; border-radius: 6px; background: var(--surface-2); }
   .cover.fill { width: 100%; aspect-ratio: 1; }
   .cover.round { border-radius: 50%; }
   img { display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0; }

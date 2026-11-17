@@ -50,8 +50,8 @@
     </dl>
     <SongRating library={song.library} songId={song.id} title={song.title} {namespace} />
     <div class="detail-actions">
-      <button class="primary" disabled={!current || !store.player} onclick={() => store.add(store.selected, item)}><Icon name="add" /> Add to queue</button>
-      <button disabled={!current || !store.player} onclick={() => store.add(store.selected, item, 0)}><Icon name="next" /> Play next</button>
+      <button class="btn primary" disabled={!current || !store.player} onclick={() => store.add(store.selected, item)}><Icon name="add" /> Add to queue</button>
+      <button class="btn" disabled={!current || !store.player} onclick={() => store.add(store.selected, item, 0)}><Icon name="next" /> Play next</button>
       {#if sonic && pathFrom !== null}
         <a class="action-link" draggable="false" href={buildRoute({ view: "path", library: song.library, from: pathFrom, to: song.id, namespace })} title="Songs that lead from the one playing now to this one, picked by how they sound"><Icon name="path" size={18} /> Blend into this song</a>
       {/if}
@@ -68,7 +68,7 @@
     {#if similar.loading}
       <p class="muted" role="status">Looking for similar songs…</p>
     {:else if similar.error}
-      <div class="notice error" role="alert"><p>{similar.error}</p><button onclick={() => similar.reload()}>Try again</button></div>
+      <div class="notice error" role="alert"><p>{similar.error}</p><button class="btn" onclick={() => similar.reload()}>Try again</button></div>
     {:else if matches.length}
       <SongList songs={matches.map((match) => match.track)} {namespace} covers similarities={matches.map((match) => match.similarity)} />
     {:else}

@@ -33,7 +33,7 @@
     <form class="add-search" role="search" onsubmit={submit}>
       <label for="add-search-input" class="visually-hidden">Search for albums to add</label>
       <input id="add-search-input" type="search" placeholder="Artist or album" maxlength="200" bind:value={search} autocomplete="off" />
-      <button class="primary" type="submit" disabled={!current}><Icon name="search" size={18} /> Search</button>
+      <button class="btn primary" type="submit" disabled={!current}><Icon name="search" size={18} /> Search</button>
     </form>
     {#if !current}
       <p class="notice muted" role="status">Searching will resume after the connection is restored.</p>
@@ -42,7 +42,7 @@
     {:else if result.loading}
       <p class="notice" role="status">Searching…</p>
     {:else if result.error}
-      <div class="notice error" role="alert"><p>{result.error}</p><button onclick={() => result.reload()}>Try again</button></div>
+      <div class="notice error" role="alert"><p>{result.error}</p><button class="btn" onclick={() => result.reload()}>Try again</button></div>
     {:else if result.data}
       <p class="muted">Results for “{route.q}”</p>
       {#if albums.length}
@@ -75,7 +75,7 @@
   .add-search { display: flex; gap: 0.5rem; margin: 0 0 1.25rem; max-width: 36rem; }
   .add-search input { flex: 1; min-width: 0; }
   .media-card { min-width: 0; display: flex; flex-direction: column; gap: 0.25rem; padding: 0.65rem; border-radius: 8px; background: var(--surface); }
-  .media-card:hover, .media-card:focus-within { background: var(--surface-hover); }
+  .media-card:hover, .media-card:focus-within { background: var(--surface-2); }
   .art-link { display: block; margin-bottom: 0.35rem; }
   .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85rem; }

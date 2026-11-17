@@ -117,7 +117,7 @@
   <a class="skip-link" href="#main-content" onclick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>Skip to content</a>
   <header class="app-header">
     {#if !store.invalid}
-      <button class="icon-button menu-toggle" bind:this={menuButton} aria-label={menuOpen ? "Close navigation" : "Open navigation"} aria-expanded={menuOpen} aria-controls="navigation" onclick={() => (menuOpen = !menuOpen)}><Icon name={menuOpen ? "close" : "menu"} /></button>
+      <button class="icon-btn menu-toggle" bind:this={menuButton} aria-label={menuOpen ? "Close navigation" : "Open navigation"} aria-expanded={menuOpen} aria-controls="navigation" onclick={() => (menuOpen = !menuOpen)}><Icon name={menuOpen ? "close" : "menu"} /></button>
     {/if}
     <a class="brand" href={buildRoute({ view: "queue" })}><Icon name="note" /> nuschl musicbot</a>
     {#if store.snapshot && !store.invalid}<span class="viewer muted">Listening as {store.snapshot.you}</span>{/if}
@@ -139,7 +139,7 @@
         <form class="search-form" role="search" onsubmit={submitSearch}>
           <label for="library-search" class="visually-hidden">Search all libraries</label>
           <input id="library-search" type="search" placeholder="Search music" bind:value={search} autocomplete="off" />
-          <button class="icon-button" type="submit" aria-label="Search"><Icon name="search" /></button>
+          <button class="icon-btn" type="submit" aria-label="Search"><Icon name="search" /></button>
         </form>
         <label class="library-choice" for="library-choice">Library</label>
         <select id="library-choice" value={store.library} disabled={store.browseKey === null || !libraries.length} onchange={changeLibrary}>
@@ -156,11 +156,11 @@
           {#if confirmForget}
             <p class="muted" id="forget-explanation">This browser will drop its link to the bot. To come back, send <code>!web</code> again.</p>
             <div class="forget-actions">
-              <button aria-describedby="forget-explanation" disabled={forgetting} onclick={forgetBrowser}>Forget</button>
-              <button disabled={forgetting} use:focusOnMount onclick={cancelForget}>Cancel</button>
+              <button class="btn" aria-describedby="forget-explanation" disabled={forgetting} onclick={forgetBrowser}>Forget</button>
+              <button class="btn" disabled={forgetting} use:focusOnMount onclick={cancelForget}>Cancel</button>
             </div>
           {:else}
-            <button class="link-button" bind:this={forgetOpener} onclick={() => (confirmForget = true)}>Forget this browser</button>
+            <button class="link-btn" bind:this={forgetOpener} onclick={() => (confirmForget = true)}>Forget this browser</button>
           {/if}
         </div>
       </aside>
@@ -196,7 +196,7 @@
 
 <div class="toast-list" aria-live="polite" aria-atomic="false">
   {#each store.toasts as toast (toast.id)}
-    <div class="toast"><p>{toast.text}</p><button class="icon-button" aria-label="Dismiss notification" onclick={() => store.dismiss(toast.id)}><Icon name="close" size={18} /></button></div>
+    <div class="toast"><p>{toast.text}</p><button class="icon-btn" aria-label="Dismiss notification" onclick={() => store.dismiss(toast.id)}><Icon name="close" size={18} /></button></div>
   {/each}
 </div>
 
@@ -218,14 +218,12 @@
   .sidebar select { width: 100%; }
   nav { display: grid; gap: 0.25rem; margin-top: 1rem; }
   nav a { display: flex; align-items: center; gap: 0.65rem; padding: 0.65rem 0.5rem; border-radius: 6px; color: var(--muted); }
-  nav a:hover, nav a.active { background: var(--surface-hover); color: var(--text); }
+  nav a:hover, nav a.active { background: var(--surface-2); color: var(--fg); }
   nav a.active { color: var(--accent); }
   .sidebar-help { font-size: 0.75rem; line-height: 1.5; margin-top: 2rem; }
   .forget { margin-top: 0.75rem; }
   .forget p { margin: 0 0 0.5rem; }
   .forget-actions { display: flex; gap: 0.5rem; }
-  .link-button { min-height: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; }
-  .link-button:hover:not(:disabled) { background: none; text-decoration: underline; }
   .main-content { flex: 1; min-width: 0; overflow: auto; padding: 1.5rem; scroll-behavior: smooth; }
   .queue-aside { width: 22rem; flex: none; overflow: auto; padding: 1rem; border-left: 1px solid var(--border); background: var(--surface); }
   .menu-toggle, .nav-backdrop { display: none; }

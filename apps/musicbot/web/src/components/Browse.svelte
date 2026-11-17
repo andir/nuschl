@@ -83,7 +83,7 @@
           </select>
         </label>
       {/if}
-      <button class="share" disabled={link === null} aria-label="Copy link to this page" aria-describedby={shareProblem === null ? undefined : "share-problem"} title={shareProblem === null ? "Copy a link for people who have their own link to this bot" : undefined} onclick={copyLink}><Icon name="link" size={18} /> Copy link</button>
+      <button class="btn share" disabled={link === null} aria-label="Copy link to this page" aria-describedby={shareProblem === null ? undefined : "share-problem"} title={shareProblem === null ? "Copy a link for people who have their own link to this bot" : undefined} onclick={copyLink}><Icon name="link" size={18} /> Copy link</button>
     </div>
   </div>
   {#if shareProblem !== null}
@@ -97,9 +97,9 @@
   {/if}
   {#if route.view === "albums"}
     <div class="pagination">
-      <button disabled={!current || page === 0 || result.loading} onclick={() => changePage(page - 1)}>Previous</button>
+      <button class="btn" disabled={!current || page === 0 || result.loading} onclick={() => changePage(page - 1)}>Previous</button>
       <span class="muted">Page {page + 1}</span>
-      <button disabled={!current || !data?.more || result.loading} onclick={() => changePage(page + 1)}>Next</button>
+      <button class="btn" disabled={!current || !data?.more || result.loading} onclick={() => changePage(page + 1)}>Next</button>
     </div>
   {/if}
 
@@ -108,7 +108,7 @@
   {:else if result.loading}
     <p class="notice" role="status">Loading library…</p>
   {:else if result.error}
-    <div class="notice error" role="alert"><p>{result.error}</p><button onclick={() => result.reload()}>Try again</button></div>
+    <div class="notice error" role="alert"><p>{result.error}</p><button class="btn" onclick={() => result.reload()}>Try again</button></div>
   {:else if route.view === "search" && !route.q.trim()}
     <p class="notice muted">Search for songs, albums or artists using the search box.</p>
   {:else if data}
@@ -117,9 +117,9 @@
       {#if !data.albums.length}<p class="notice muted">No albums in this list.</p>{/if}
       {#if data.albums.length}
         <div class="pagination bottom">
-          <button disabled={page === 0} onclick={() => changePage(page - 1)}>Previous</button>
+          <button class="btn" disabled={page === 0} onclick={() => changePage(page - 1)}>Previous</button>
           <span class="muted">Page {page + 1}</span>
-          <button disabled={!data.more} onclick={() => changePage(page + 1)}>Next</button>
+          <button class="btn" disabled={!data.more} onclick={() => changePage(page + 1)}>Next</button>
         </div>
       {/if}
     {:else if route.view === "artists"}
@@ -156,8 +156,8 @@
         {/if}
         <p class="muted metadata"><span>{matchSongs.length} tracks</span><span>{formatDuration(totalDuration(matchSongs))}</span></p>
         <div class="detail-actions">
-          <button class="primary" disabled={!current || !store.player || !matches.length} title={route.view === "similar" ? "Adds every song listed except exact copies of this one" : undefined} onclick={() => store.add(store.selected, sonicItem)}><Icon name="add" /> Add all</button>
-          <button disabled={!current || !store.player || !matches.length} title={route.view === "similar" ? "Plays every song listed next except exact copies of this one" : undefined} onclick={() => store.add(store.selected, sonicItem, 0)}><Icon name="next" /> Play all next</button>
+          <button class="btn primary" disabled={!current || !store.player || !matches.length} title={route.view === "similar" ? "Adds every song listed except exact copies of this one" : undefined} onclick={() => store.add(store.selected, sonicItem)}><Icon name="add" /> Add all</button>
+          <button class="btn" disabled={!current || !store.player || !matches.length} title={route.view === "similar" ? "Plays every song listed next except exact copies of this one" : undefined} onclick={() => store.add(store.selected, sonicItem, 0)}><Icon name="next" /> Play all next</button>
         </div>
       </div>
       <SongList songs={matchSongs} {namespace} covers similarities={matches.map((match) => match.similarity)} />
@@ -182,8 +182,8 @@
           </p>
           {#if route.view !== "artist"}
             <div class="detail-actions">
-              <button class="primary" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace })}><Icon name="add" /> Add to queue</button>
-              <button disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace }, 0)}><Icon name="next" /> Play next</button>
+              <button class="btn primary" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace })}><Icon name="add" /> Add to queue</button>
+              <button class="btn" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace }, 0)}><Icon name="next" /> Play next</button>
             </div>
           {/if}
         </div>

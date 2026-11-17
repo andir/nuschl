@@ -154,7 +154,7 @@
     background: var(--border);
     overflow: hidden;
   }
-  .fill { height: 100%; background: var(--text); }
+  .fill { height: 100%; background: var(--fg); }
   .bar:hover .fill, .bar.active .fill, .bar:focus-visible .fill { background: var(--accent); }
   .thumb {
     position: absolute;
@@ -163,7 +163,7 @@
     height: 12px;
     margin-left: -6px;
     border-radius: 50%;
-    background: var(--text);
+    background: var(--fg);
     opacity: 0;
   }
   .bar:hover .thumb, .bar.active .thumb, .bar:focus-visible .thumb { opacity: 1; }
@@ -173,8 +173,8 @@
     transform: translateX(-50%);
     padding: 0.1rem 0.4rem;
     border-radius: 4px;
-    background: var(--text);
-    color: var(--background);
+    background: var(--fg);
+    color: var(--bg);
     font-size: 0.75rem;
     font-variant-numeric: tabular-nums;
     pointer-events: none;

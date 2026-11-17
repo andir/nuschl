@@ -73,7 +73,7 @@
 <section class="queue-panel" class:compact bind:this={root} aria-labelledby="{id}-title" ondragover={dragover} ondrop={drop} ondragleave={(event) => { if (leftElement(event, root)) gap = null; }}>
   <div class="queue-heading">
     <h1 id="{id}-title">Queue</h1>
-    {#if queue.length}<button class="small" onclick={() => store.clear(selected)}>Clear upcoming</button>{/if}
+    {#if queue.length}<button class="btn small" onclick={() => store.clear(selected)}>Clear upcoming</button>{/if}
   </div>
   {#if players.length}
     <label class="queue-choice"><span class="visually-hidden">Selected queue</span>
@@ -108,7 +108,7 @@
     <ol class="queue-list" aria-label="Upcoming tracks">
       {#each queue as entry, i (entry.id)}
         <li data-queue-index={i} draggable="true" class:drop-before={gap === i} class:drop-after={gap === queue.length && i === queue.length - 1} class:dragged={dragged === entry.id} ondragstart={(event) => { dragged = entry.id; startEntryDrag(event, entry.id); }} ondragend={() => { dragged = null; gap = null; }}>
-          <button class="icon-button grip" draggable="true" aria-label="Move {entry.track.title}" aria-describedby="{id}-help" title="Drag to reorder, or Alt + ↑ / ↓" onkeydown={(event) => reorder(event, entry.id)}><Icon name="grip" /></button>
+          <button class="icon-btn grip" draggable="true" aria-label="Move {entry.track.title}" aria-describedby="{id}-help" title="Drag to reorder, or Alt + ↑ / ↓" onkeydown={(event) => reorder(event, entry.id)}><Icon name="grip" /></button>
           <Cover library={entry.track.library} art={entry.track.cover_art} size={96} px={40} />
           <div class="description">
             <div class="title" title={entry.track.title}>{#if entry.track.library != null && entry.track.id}<a href={buildRoute({ view: "song", library: entry.track.library, id: entry.track.id, namespace: store.browseKey })} draggable="false">{entry.track.title}</a>{:else}{entry.track.title}{/if}</div>
@@ -119,8 +119,8 @@
           </div>
           <span class="muted duration">{formatDuration(entry.track.duration)}</span>
           <div class="row-actions">
-            <button class="icon-button" disabled={i === 0} aria-label="Move {entry.track.title} to play next" title="Play next" onclick={() => store.move(selected, entry.id, 0)}><Icon name="next" size={18} /></button>
-            <button class="icon-button" aria-label="Remove {entry.track.title}" title="Remove from queue" onclick={() => store.remove(selected, entry.id)}><Icon name="remove" size={18} /></button>
+            <button class="icon-btn" disabled={i === 0} aria-label="Move {entry.track.title} to play next" title="Play next" onclick={() => store.move(selected, entry.id, 0)}><Icon name="next" size={18} /></button>
+            <button class="icon-btn" aria-label="Remove {entry.track.title}" title="Remove from queue" onclick={() => store.remove(selected, entry.id)}><Icon name="remove" size={18} /></button>
           </div>
         </li>
       {/each}
@@ -148,7 +148,7 @@
   .upcoming-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
   .queue-list { list-style: none; margin: 0; padding: 0; }
   li { position: relative; display: flex; align-items: center; gap: 0.5rem; padding: 0.55rem 0; border-bottom: 1px solid var(--border); cursor: grab; }
-  li:hover, li:focus-within { background: var(--surface-hover); }
+  li:hover, li:focus-within { background: var(--surface-2); }
   li.drop-before::before, li.drop-after::after { content: ""; position: absolute; left: 0; right: 0; height: 3px; background: var(--accent); z-index: 1; }
   li.drop-before::before { top: -2px; }
   li.drop-after::after { bottom: -2px; }
@@ -157,7 +157,7 @@
   .duration { font-variant-numeric: tabular-nums; font-size: 0.8rem; }
   .row-actions { display: flex; }
   .drop-end { min-height: 6rem; padding: 1rem; text-align: center; font-size: 0.85rem; border: 2px dashed transparent; margin-top: 0.5rem; border-radius: 8px; }
-  .drop-end.target { border-color: var(--accent); background: var(--surface-hover); }
+  .drop-end.target { border-color: var(--accent); background: var(--surface-2); }
   .compact h1 { font-size: 1.3rem; }
   .compact .duration { display: none; }
   .compact .row-actions { flex-direction: column; }
