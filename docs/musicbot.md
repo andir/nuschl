@@ -15,10 +15,15 @@ browsers. People control what plays on a web page; they get their link by writin
 - **Browsing.** The web page browses each library much like Navidrome's own: album
   lists (recently added, recently played, most played, random, by name, starred)
   with covers, the artist index, an artist's albums, an album's songs, and
-  playlists. A search asks all libraries at once for artists, albums and songs.
-  Every song, album and playlist has *Add* and *Play next*. Song titles open the
-  song's page: its details (track, disc, length, year, genre, format, play count),
-  rating, the albums it appears on and, with sonic similarity, similar songs.
+  playlists. The artist index has a bar of initials that stays at the top while
+  scrolling; each initial scrolls to its artists. A search asks all libraries at
+  once for artists, albums and songs. While typing two or more characters in the
+  search field, a list under it suggests a few artists, albums and songs with
+  their covers; arrow keys pick one, Enter opens its page and Enter without a
+  pick runs the full search; Escape closes the list. Every song, album and
+  playlist has *Add* and *Play next*. Song titles open the song's page: its
+  details (track, disc, length, year, genre, format, play count), rating, the
+  albums it appears on and, with sonic similarity, similar songs.
   Choose the destination queue in the player bar; the browser remembers the
   selection for the page (per public address and path).
 - **Sonic similarity.** Libraries with the OpenSubsonic `sonicSimilarity` extension
@@ -807,8 +812,8 @@ and library failures the redacted errors of browsing.
 is the index after removing the moved entry. `add.index` is an insertion position,
 or null for the end. Successful commands return 204 and broadcast the new state.
 
-Browsing uses `albums`, `album`, `artists`, `artist`, `playlists`, `playlist`, and
-`search` JSON endpoints. Library identity in requests is its current config index.
+Browsing uses `albums`, `album`, `artists`, `artist`, `playlists`, `playlist`,
+`search` and `suggest` JSON endpoints. Library identity in requests is its current config index.
 Album lists accept `library`, `list`, and `page`; detail endpoints accept `library`
 and `id`. The authenticated `art/<library>/<id>?size=…&v=…` route returns
 `image/png`: a PNG the content worker made from the decoded art (8-bit RGBA,
@@ -861,6 +866,19 @@ extension answer these endpoints with an error instead of being queried.
 "lines":[{"start_ms":N|null,"text":"…"}]}}`, or `{"lyrics":null}` when the
 library has none. `start_ms` is set on every line of synced lyrics and null
 otherwise. Library failures return the redacted errors of browsing.
+
+`GET suggest?q=…` returns `{"items":[{"library":N,"kind":"artist"|"album"|"song",
+"id":"ID","title":"…","subtitle":"…"|null,"cover_art":"ID"|null}]}` for the
+suggestions under the search field. `q` is trimmed and cut to 200 characters;
+fewer than 2 characters give no items without asking a library. Every library
+gets one `search3` with `artistCount=3`, `albumCount=3` and `songCount=5`, and
+the bot keeps at most that many of each kind per library. Items list the
+artists of every library in library order, then the albums, then the songs, and
+stop at 10. `subtitle` is the artist of an album or song. Libraries that fail
+add no items. The calls share the admission of the other library calls: with
+all eight in use the answer is 503 `the music library is busy`, and the page
+then shows no suggestions. Subsonic and OpenSubsonic define no suggestion call;
+Navidrome's `search3` matches the start of each word, which suits typing.
 
 `add` also accepts `kind: "similar"` with the song in `id`, and `kind: "path"` with
 the start in `id` and the target in `to`. The bot asks the library again when
