@@ -1536,15 +1536,9 @@ fn distinct_similar(matches: Vec<SonicMatch>, seed: &Track) -> Vec<SonicMatch> {
 /// compared without case or extra spaces, and lengths at most 3 seconds apart
 /// when both are known.
 fn same_recording(a: &Track, b: &Track) -> bool {
-    fn words(text: Option<&str>) -> String {
-        text.unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    }
-    words(Some(&a.title)) == words(Some(&b.title))
-        && words(a.artist.as_deref()) == words(b.artist.as_deref())
+    import::normalized(&a.title) == import::normalized(&b.title)
+        && import::normalized(a.artist.as_deref().unwrap_or_default())
+            == import::normalized(b.artist.as_deref().unwrap_or_default())
         && match (a.duration, b.duration) {
             (Some(a), Some(b)) => a.abs_diff(b) <= 3,
             _ => true,
@@ -1990,7 +1984,7 @@ const MIN_SUGGEST_QUERY: usize = 2;
 /// Most items one suggestion answer holds.
 const MAX_SUGGESTIONS: usize = 10;
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SuggestionKind {
     Artist,
@@ -2015,7 +2009,9 @@ struct Suggestions {
 }
 
 /// A few artists, albums and songs for the text typed so far: artists of every
-/// library first, then albums, then songs, cut to `MAX_SUGGESTIONS`. Libraries
+/// library first, then albums, then songs, cut to `MAX_SUGGESTIONS`. An item
+/// with the kind, title and artist of an earlier one is left out, so the same
+/// artist in two libraries or the same song on two albums shows once. Libraries
 /// that fail add nothing.
 async fn suggest(
     State(bot): State<Arc<Bot>>,
@@ -2065,10 +2061,18 @@ async fn suggest(
             subtitle: song.artist.clone(),
             cover_art: song.cover_art.clone(),
         });
+    let mut seen = std::collections::HashSet::new();
     Ok(Json(Suggestions {
         items: artists
             .chain(albums)
             .chain(songs)
+            .filter(|item| {
+                seen.insert((
+                    item.kind,
+                    import::normalized(&item.title),
+                    import::normalized(item.subtitle.as_deref().unwrap_or_default()),
+                ))
+            })
             .take(MAX_SUGGESTIONS)
             .collect(),
     }))
@@ -4277,8 +4281,16 @@ mod tests {
                         })
                         .collect::<Vec<_>>()
                 };
+                // The second song is a copy of the first on another album,
+                // spelled with other case and spacing.
+                let mut songs = entries("s", 8);
+                songs.insert(
+                    1,
+                    serde_json::json!({"id": "s0-copy", "title": "S  0", "artist": "waves",
+                        "coverArt": "c-s0-copy"}),
+                );
                 serde_json::json!({"subsonic-response": {"status": "ok", "searchResult3": {
-                    "artist": entries("ar", 5), "album": entries("al", 5), "song": entries("s", 8)}}})
+                    "artist": entries("ar", 5), "album": entries("al", 5), "song": songs}}})
             };
             let body = serde_json::to_vec(&body).unwrap();
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
@@ -4312,7 +4324,8 @@ mod tests {
                 assert!(request.contains(parameter), "{parameter} in {request}");
             }
         }
-        // Three artists from each library, then albums until the bound.
+        // Both libraries answer alike: each artist and album shows once, from the
+        // first library, then songs until the bound.
         assert_eq!(items.len(), MAX_SUGGESTIONS);
         let order: Vec<_> = items
             .iter()
@@ -4324,13 +4337,13 @@ mod tests {
                 (0, "ar0"),
                 (0, "ar1"),
                 (0, "ar2"),
-                (1, "ar0"),
-                (1, "ar1"),
-                (1, "ar2"),
                 (0, "al0"),
                 (0, "al1"),
                 (0, "al2"),
-                (1, "al0"),
+                (0, "s0"),
+                (0, "s1"),
+                (0, "s2"),
+                (0, "s3"),
             ]
         );
         assert_eq!(
@@ -4339,7 +4352,7 @@ mod tests {
                 "subtitle": null, "cover_art": "c-ar0"})
         );
         assert_eq!(
-            serde_json::to_value(&items[6]).unwrap(),
+            serde_json::to_value(&items[3]).unwrap(),
             serde_json::json!({"library": 0, "kind": "album", "id": "al0", "title": "al 0",
                 "subtitle": "Waves", "cover_art": "c-al0"})
         );

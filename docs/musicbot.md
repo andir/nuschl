@@ -910,7 +910,10 @@ fewer than 2 characters give no items without asking a library. Every library
 gets one `search3` with `artistCount=3`, `albumCount=3` and `songCount=5`, and
 the bot keeps at most that many of each kind per library. Items list the
 artists of every library in library order, then the albums, then the songs, and
-stop at 10. `subtitle` is the artist of an album or song. Libraries that fail
+stop at 10. An item with the kind, title and artist of an earlier one (compared
+without case or extra spaces) is left out, so the same artist in two libraries
+or the same song on two albums shows once, from the first place it was found.
+`subtitle` is the artist of an album or song. Libraries that fail
 add no items. The calls share the admission of the other library calls: with
 all eight in use the answer is 503 `the music library is busy`, and the page
 then shows no suggestions. Subsonic and OpenSubsonic define no suggestion call;
