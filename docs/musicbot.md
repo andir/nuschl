@@ -67,6 +67,10 @@ browsers. People control what plays on a web page; they get their link by writin
   the whole window: large cover, scrubber, play/pause and skip, browser listening,
   Mumble volume, rating and the next songs. It can also switch to full screen;
   Esc closes it.
+- **DJ mode.** A queue switches into DJ mode on the DJ page: two decks with
+  their own decoders, mixed live into the queue's Mumble and browser output,
+  with crossfader, one-button fades, EQ, filter, tempo with BPM sync,
+  headphone cue in the browser and MIDI controllers. Details below.
 - **Queues.** Drag songs, albums or playlists from the library into the queue,
   then drag entries to reorder them. The move handles also accept Alt+Up/Down.
   Remove entries, clear upcoming tracks, skip, pause and set the volume. The player
@@ -81,6 +85,7 @@ browsers. People control what plays on a web page; they get their link by writin
   attempts per queue, newest first. It shows track details, who queued the track,
   local start/end times, transmitted duration, and whether it completed, was
   skipped, or failed. History survives restarts and loads in pages of 50.
+  In DJ mode, deck songs the room heard enter it the same way (see DJ mode).
 - **Library history.** Playback also appears in the configured Subsonic account's
   history and play counts. Shared channels count as one play; independent queues
   count separately. The submission rules are described below.
@@ -257,15 +262,20 @@ bot reconnects with growing pauses up to a minute.
 ## Security and codec roles
 
 The parent owns Mumble TLS, Subsonic credentials, bearer links and queue metadata.
-It transports opaque library bytes; it does not call a decoder, resampler, voice
-classifier or encoder, and does not link one: the codec crates belong to the separate
+It transports opaque library bytes; it does not call a decoder, voice classifier
+or encoder, and does not link one: the codec crates belong to the separate
 `nuschl-musicbot-codec-worker`, which `cargo-deny` alone allows to depend on them.
+The parent's own signal processing works on the validated 48 kHz PCM the decode
+children return: the volume and ducking gain, and in DJ mode the mix, EQ and
+filter biquads, the tempo resampler and a limiter, all first-party safe Rust on
+plain sample arrays (`apps/musicbot/src/player/dsp.rs`).
 The bot starts that worker only from its fixed place beside itself
 (`<prefix>/libexec/nuschl-musicbot/`; a missing worker fails the operation) as
 `--codec-worker <role>`, in one fixed role, through versioned, size-capped IPC
 (`nuschl_ipc::musicbot`):
 
-- Decode: one child for the current track of each active player. The parent streams
+- Decode: one child for the current track of each active player, and in DJ mode
+  one per loaded deck (two at most). The parent streams
   bounded opaque chunks; the child returns exactly 20 ms of finite stereo PCM per
   reply. The retained parent queue is 250 frames (5 seconds, 1,920,000 PCM bytes), plus at most
   five 32 KiB pump/read/write buffers, one 64 KiB response and bounded pipe storage.
@@ -423,6 +433,12 @@ service fault checks remain separate evidence.
 Rust tests cover queue ordering, seek boundaries, history lifecycle and retention,
 durable state, library identity across reordering/removal, gain ramps, VAD,
 and authenticated rating reads/writes, bounds, failures and live revisions.
+DJ mode's tests cover crossfader curves, EQ and filter responses, resampler
+length and continuity at five tempos, gain ramps, the limiter, the transition
+timeline, position accounting, auto load, failure back-off, entering and leaving,
+control ranges, cue admission, the SSE rate, and in the real playback loop with
+controlled decoders that two decks hold exactly two decoders that retire before
+the queue resumes.
 Frontend tests cover progress interpolation, scrubbing, drag indices, route
 encoding, shortcuts, and history pagination during live refreshes.
 `tests/musicbot.py` drives the JSON API and two SSE viewers against stock Murmur
@@ -492,6 +508,79 @@ Verified in real Chromium with stock Murmur: browser-only playback with Mumble
 volume zero, independent local mute/volume, pause/seek/skip, queue switching,
 listener release and suspension cleanup. Reference-Opus Mumble output fell to
 the configured speech-ducking level while measured browser output stayed steady.
+
+## DJ mode
+
+**DJ mode** on the DJ page (or **DJ mode** in the queue's heading) turns the
+selected queue into two decks, A and B, mixed live into the same output: its
+Mumble channels and its browser listeners hear the mix, with the queue's Mumble
+volume and speech ducking applied as before. The playing song continues on deck A
+at its position with its decoder; with auto load on, the queue's next song waits
+on deck B, paused. **Leave DJ mode** continues the lead deck's song (the playing
+one, else the louder one) as the queue's current song from its position.
+
+Each deck has title, artist and cover; the song's BPM at the deck's tempo when
+the library gives one (OpenSubsonic `bpm`); the position with a seek slider,
+play/pause, **Cue** (go to the cue point), **Set cue**, load next and eject; a
+3-band EQ (low shelf 250 Hz, mid peak 1 kHz, high shelf 2.5 kHz, −26 to +6 dB),
+a filter knob (low-pass down to 60 Hz on the left, high-pass up to 8 kHz on the
+right, neutral in the middle) and the channel fader; a tempo fader with a ±8 %
+or ±16 % range that changes speed and pitch together, like a turntable, and
+**Sync**, which sets the deck's tempo so its BPM matches the other deck's
+tempo-adjusted BPM (widening the range to 16 % when needed; beat phase stays with
+the DJ); and a headphones button: this browser alone hears the deck after EQ,
+filter and tempo, before its channel fader and the crossfader, at its own volume.
+
+The mixer has the crossfader with a **Smooth** curve (constant power, each deck
+at −3 dB in the middle) or a **Cut** curve (both decks at full level, cut within
+the last 4 % of the travel), **Fade to A/B**, which moves the crossfader to the
+other deck over the chosen time and starts that deck, and **Auto load**: after a
+fade the deck that went silent pauses and takes the queue's next song, and a deck
+whose song ends takes the next one too. Moving the crossfader stops a fade where
+it is. Song rows in the library, playlists and the queue get **A** and **B**
+buttons; a queue song leaves the queue, and a queue song that leaves a deck before
+the room heard it returns to the front of the queue. Everyone with a link controls
+the decks.
+
+**How it sounds.** Every control sets a target; the bot moves gains, EQ, filter
+and tempo towards it one step per 20 ms frame (settling in about 60 ms), ramps
+within the frame and recomputes filter coefficients every 32 samples. Play,
+pause, seeks and cue jumps fade over one frame. A peak limiter keeps the sum of
+both decks within full scale. The page sends a moving control about 30 times a
+second, one request at a time per control.
+
+**Latency.** A control reaches the mix after the network delay, typically 0.1 to
+0.3 seconds, plus up to 20 ms; Mumble and browsers add their own buffering. A seek
+or cue jump restarts that deck's decoder, like a queue seek; the other deck plays on.
+
+**Limits.** Two decks per queue; each holds one decode child at most and starts a
+new one only after the old one has exited, so two loaded decks cost exactly two
+decode children, which exit when DJ mode ends. A decode failure fails that deck's
+song; the deck's next decoder waits 0.5 seconds, doubling per failure in a row up
+to 8 seconds, and after three failures in a row auto load stops with a notice.
+Three encoder failures in a row pause DJ mode with a notice. Four headphone cue
+streams across the bot. DJ mode itself is not saved: after a restart the lead
+deck's song continues as the queue's current song.
+
+**History.** A deck's song counts as heard while the room's mix reaches a Mumble
+channel or a browser listener and the deck sounds in it at −20 dB or more
+(channel fader times crossfader); the first heard frame starts the play and
+announces it as now playing. When the song leaves the deck (end, eject, a new
+song, a fade with auto load, leaving DJ mode) the play enters the history like a
+queue play: completed at the end, skipped otherwise, failed on errors. Scrobbling
+uses the queue's threshold on heard time. Headphone cue audio never counts.
+
+**MIDI controllers.** In browsers with Web MIDI (Chromium-based, over HTTPS or on
+localhost), **Use a MIDI controller** lists the inputs. **Learn** beside a
+control, or **Learn on the decks** and a click on it, binds the next fader, knob or
+button moved; Escape cancels. Faders and knobs take control changes: absolute,
+14-bit when the controller also sends controller + 32 while learning, or relative
+encoders (1–63 up, 65–127 down); EQ, filter, tempo and crossfader knobs rest at
+their middle. Buttons take note-on or a control change of 64 or more. The mapping
+is kept in localStorage per device name and can be cleared. MIDI drives the queue
+selected on the page; headphone cue needs a click. The bot sends no
+Permissions-Policy header, so Web MIDI's default allowlist (`self`) admits the
+page's own origin. No controller presets ship.
 
 ## Lyrics
 
@@ -734,7 +823,8 @@ the cookie. Cookie requests from another origin or site get 403 (see Links).
 POST bodies must be JSON, which cross-site forms cannot send. `POST forget` with
 `{}` answers 204 and deletes this browser's cookie. `GET state` returns a
 snapshot; `GET events` sends `event: state` SSE frames immediately, after changes,
-and roughly every two seconds for progress correction. Slow viewers receive the
+and roughly every two seconds for progress correction, at most ten a second (DJ
+faders change the state up to 30 times a second). Slow viewers receive the
 latest state when they can read again. Revoked links lose access to the stream.
 At most 32 streams may remain open across all tokens; excess viewers receive 503.
 The permit belongs to the response stream, not merely its request handler.
@@ -755,6 +845,13 @@ stream with nothing else to send (a paused or waiting queue) sends one at least 
 open. The stream remains open while the queue waits; disconnecting releases its
 subscription. Revoked links are
 checked during playback and at least once per second while idle or backpressured.
+
+`GET cue?player=N&deck=D` streams one DJ deck before its channel fader in the
+same format and records, for headphones in one browser. Invalid links return 404,
+unknown queues and decks 400, and with all four cue streams in use 503; cue
+streams have this admission of their own beside the 16 listening streams. A cue
+stream stays open while DJ mode is off and then sends only keep-alives.
+Seeking or loading the deck resets it.
 
 The authenticated `GET licenses` route serves the installed, bounded
 licence text. Nix packages are gated by the scoped Rust/npm notice inventory;
@@ -818,6 +915,39 @@ and library failures the redacted errors of browsing.
 `attach`. Commands include a player index; entries have stable IDs. `move.index`
 is the index after removing the moved entry. `add.index` is an insertion position,
 or null for the end. Successful commands return 204 and broadcast the new state.
+
+`POST dj` accepts one DJ mode control per request, JSON tagged by `control`, with
+`player` (the queue index) and, for deck controls, `deck` (0 for A, 1 for B):
+
+| Control | Fields | Range |
+| --- | --- | --- |
+| `mode` | `on` | turns DJ mode on or off |
+| `load` | `library` and `id` (a library song), or `entry` (a queue entry, which leaves the queue) | song ids of 1 to 128 bytes |
+| `eject`, `set_cue`, `jump_to_cue`, `sync` | — | |
+| `play` | `playing` | |
+| `seek` | `position_ms` (song time) | 0 to three hours, clamped to the song |
+| `volume` | `volume` | 0 to 100 |
+| `eq` | `band` (`low`, `mid`, `high`), `db` | −26 to 6 |
+| `filter` | `value` | −1 (low-pass) to 1 (high-pass), 0 neutral |
+| `tempo` | `tempo` in percent | −16 to 16, clamped to the deck's range |
+| `tempo_range` | `range` | 8 or 16 |
+| `crossfader` | `position` | −1 (deck A) to 1 (deck B) |
+| `curve` | `curve` | `smooth` or `cut` |
+| `transition` | `seconds` | 1 to 60 |
+| `auto_load` | `on` | |
+
+Values outside a range and unknown decks answer 400; a control the state refuses
+answers 409 with the reason (DJ mode off, an empty deck, a queue entry gone,
+sync without both BPMs or beyond 16 %, a fade to an empty deck).
+Successful controls return 204. State/SSE gives each player `dj`: null, or
+`{"decks":[Deck,Deck],"crossfader":N,"curve":"smooth"|"cut","transition":
+{"to":N,"duration_ms":N,"elapsed_ms":N}|null,"auto_load":bool,"notice":"…"|null}`,
+where a Deck has `entry` (the queue's entry format, or null), `position_ms` (song
+time), `playing`, `buffering`, `advancing`, `cue_ms`, `volume`, `eq`
+(`{"low":N,"mid":N,"high":N}`), `filter`, `tempo` (percent), `tempo_range`,
+`bpm` (the library's BPM, or null), `error` and `cue_listeners`. Song time
+advances `tempo` percent faster than real time while `advancing`. In DJ mode the
+player's `current` is null.
 
 Browsing uses `albums`, `album`, `artists`, `artist`, `genres`, `genre/albums`,
 `genre/songs`, `playlists`, `playlist`, `search` and `suggest` JSON endpoints.
