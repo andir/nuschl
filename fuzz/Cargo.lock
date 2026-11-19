@@ -3253,6 +3253,8 @@ name = "nuschl-client"
 version = "0.2.0"
 dependencies = [
  "hex",
+ "icu_collator",
+ "js-sys",
  "nuschl-core",
  "nuschl-ipc",
  "nuschl-legacy-html",

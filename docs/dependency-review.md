@@ -38,6 +38,7 @@ algorithms globally, or relax the crypto-bigint advisory policy below. See the
 | Content | pulldown-cmark and Syntect with fancy-regex | No native Oniguruma; fixed bundled syntax/theme set; content worker and timeout |
 | Echo cancellation | Sonora | Rust port of WebRTC processing; assess quality/timing before routing real calls |
 | Noise suppression | nnnoiseless | Rust RNNoise-derived implementation; enable only when route policy calls for suppression |
+| DJ EQ and filter | biquad 0.6.0 (`nuschl-musicbot`) | Safe Rust (no `unsafe` in the crate), MIT or Apache-2.0; Bristow-Johnson cookbook coefficients and direct form I filters on the PCM the confined codec worker decoded; its one dependency, num-traits with `libm`, is already in the graph |
 | Opus | opus-pure | Rust implementation with unsafe SIMD; media worker; conformance and stock-client audio tests required |
 | History | SQLx/Tokio, bundled SQLite locally and PostgreSQL for servers | SQLite FFI and database access remain in the storage worker; extension loading/deserialization are disabled |
 | Desktop | GPUI Kit without default component/assets features | Native rendering exception, not a message HTML or embedded-browser runtime |

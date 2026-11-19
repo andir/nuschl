@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! DJ mode's signal processing on decoded 48 kHz stereo PCM that the confined
 //! decode child produced and the parent validated (finite samples, whole
-//! 20 ms frames): crossfader curves, gain ramps, EQ and filter biquads, a
-//! variable-rate resampler for tempo and a peak limiter. First-party safe Rust
-//! on plain sample arrays; parsing of untrusted media stays in the worker.
+//! 20 ms frames): crossfader curves, gain ramps, EQ and filter biquads (the
+//! `biquad` crate), a variable-rate resampler for tempo and a peak limiter.
+//! Safe Rust on plain sample arrays; parsing of untrusted media stays in the
+//! worker.
 use super::{CHANNELS, FRAME};
+use biquad::{Biquad as _, Coefficients, DirectForm1, Hertz, Q_BUTTERWORTH_F64, Type};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -17,6 +19,8 @@ pub const EQ_MAX_DB: f32 = 6.0;
 const EQ_LOW_HZ: f64 = 250.0;
 const EQ_MID_HZ: f64 = 1_000.0;
 const EQ_MID_Q: f64 = 0.7;
+/// Q of the shelves: Bristow-Johnson's shelf slope of 1.
+const SHELF_Q: f64 = Q_BUTTERWORTH_F64;
 const EQ_HIGH_HZ: f64 = 2_500.0;
 /// The filter knob's ends: the low-pass falls to this cutoff on the left, the
 /// high-pass rises to this one on the right. In the middle both sit where
@@ -27,7 +31,7 @@ const HIGH_PASS_OPEN_HZ: f64 = 3.0;
 const HIGH_PASS_CLOSED_HZ: f64 = 8_000.0;
 /// The filter's resonance: flat (Butterworth) in the middle, rising to a
 /// slight peak at the cutoff within the first fifth of the knob's travel.
-const FILTER_Q_NEUTRAL: f64 = std::f64::consts::FRAC_1_SQRT_2;
+const FILTER_Q_NEUTRAL: f64 = Q_BUTTERWORTH_F64;
 const FILTER_Q_TURNED: f64 = 1.0;
 /// Filter coefficients follow their parameters in blocks this long (0.67 ms).
 const BLOCK: usize = 32;
@@ -85,152 +89,39 @@ pub fn approach(current: f32, target: f32) -> f32 {
     }
 }
 
-/// Normalised biquad coefficients (Robert Bristow-Johnson's cookbook).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Coefficients {
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
-}
+/// Coefficients that pass the signal unchanged.
+const PASS: Coefficients<f64> = Coefficients {
+    a1: 0.0,
+    a2: 0.0,
+    b0: 1.0,
+    b1: 0.0,
+    b2: 0.0,
+};
 
-impl Coefficients {
-    fn normalised(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Self {
-        Self {
-            b0: b0 / a0,
-            b1: b1 / a0,
-            b2: b2 / a0,
-            a1: a1 / a0,
-            a2: a2 / a0,
-        }
-    }
-
-    fn angle(hz: f64) -> (f64, f64) {
-        let w0 = std::f64::consts::TAU * hz / RATE;
-        (w0.cos(), w0.sin())
-    }
-
-    fn low_shelf(hz: f64, db: f64) -> Self {
-        let a = 10f64.powf(db / 40.0);
-        let (cos, sin) = Self::angle(hz);
-        // Shelf slope 1.
-        let alpha = sin / 2.0 * std::f64::consts::SQRT_2;
-        let root = 2.0 * a.sqrt() * alpha;
-        Self::normalised(
-            a * ((a + 1.0) - (a - 1.0) * cos + root),
-            2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
-            a * ((a + 1.0) - (a - 1.0) * cos - root),
-            (a + 1.0) + (a - 1.0) * cos + root,
-            -2.0 * ((a - 1.0) + (a + 1.0) * cos),
-            (a + 1.0) + (a - 1.0) * cos - root,
-        )
-    }
-
-    fn high_shelf(hz: f64, db: f64) -> Self {
-        let a = 10f64.powf(db / 40.0);
-        let (cos, sin) = Self::angle(hz);
-        let alpha = sin / 2.0 * std::f64::consts::SQRT_2;
-        let root = 2.0 * a.sqrt() * alpha;
-        Self::normalised(
-            a * ((a + 1.0) + (a - 1.0) * cos + root),
-            -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
-            a * ((a + 1.0) + (a - 1.0) * cos - root),
-            (a + 1.0) - (a - 1.0) * cos + root,
-            2.0 * ((a - 1.0) - (a + 1.0) * cos),
-            (a + 1.0) - (a - 1.0) * cos - root,
-        )
-    }
-
-    fn peaking(hz: f64, q: f64, db: f64) -> Self {
-        let a = 10f64.powf(db / 40.0);
-        let (cos, sin) = Self::angle(hz);
-        let alpha = sin / (2.0 * q);
-        Self::normalised(
-            1.0 + alpha * a,
-            -2.0 * cos,
-            1.0 - alpha * a,
-            1.0 + alpha / a,
-            -2.0 * cos,
-            1.0 - alpha / a,
-        )
-    }
-
-    fn low_pass(hz: f64, q: f64) -> Self {
-        let (cos, sin) = Self::angle(hz);
-        let alpha = sin / (2.0 * q);
-        Self::normalised(
-            (1.0 - cos) / 2.0,
-            1.0 - cos,
-            (1.0 - cos) / 2.0,
-            1.0 + alpha,
-            -2.0 * cos,
-            1.0 - alpha,
-        )
-    }
-
-    fn high_pass(hz: f64, q: f64) -> Self {
-        let (cos, sin) = Self::angle(hz);
-        let alpha = sin / (2.0 * q);
-        Self::normalised(
-            (1.0 + cos) / 2.0,
-            -(1.0 + cos),
-            (1.0 + cos) / 2.0,
-            1.0 + alpha,
-            -2.0 * cos,
-            1.0 - alpha,
-        )
-    }
-
-    /// The magnitude of the response at `hz`.
-    #[cfg(test)]
-    fn response(&self, hz: f64) -> f64 {
-        let w = std::f64::consts::TAU * hz / RATE;
-        let (c1, s1) = (w.cos(), -w.sin());
-        let (c2, s2) = ((2.0 * w).cos(), -(2.0 * w).sin());
-        let numerator = (
-            self.b0 + self.b1 * c1 + self.b2 * c2,
-            self.b1 * s1 + self.b2 * s2,
-        );
-        let denominator = (
-            1.0 + self.a1 * c1 + self.a2 * c2,
-            self.a1 * s1 + self.a2 * s2,
-        );
-        numerator.0.hypot(numerator.1) / denominator.0.hypot(denominator.1)
+/// Bristow-Johnson cookbook coefficients from the `biquad` crate. The callers
+/// clamp every frequency below Nyquist and every Q above zero, the only inputs
+/// the crate refuses; a refusal would pass the signal unchanged.
+fn coefficients(kind: Type<f64>, hz: f64, q: f64) -> Coefficients<f64> {
+    match (Hertz::from_hz(RATE), Hertz::from_hz(hz)) {
+        (Ok(rate), Ok(hz)) => Coefficients::from_params(kind, rate, hz, q).unwrap_or(PASS),
+        _ => PASS,
     }
 }
 
-/// A stereo biquad in direct form I, which tolerates coefficients that change
-/// between blocks.
-#[derive(Clone, Copy, Debug)]
-struct Biquad {
-    coefficients: Coefficients,
-    /// Per channel: the last two inputs and outputs.
-    history: [[f64; 4]; CHANNELS],
+/// The magnitude of a biquad's response at `hz`.
+#[cfg(test)]
+fn response(c: &Coefficients<f64>, hz: f64) -> f64 {
+    let w = std::f64::consts::TAU * hz / RATE;
+    let (c1, s1) = (w.cos(), -w.sin());
+    let (c2, s2) = ((2.0 * w).cos(), -(2.0 * w).sin());
+    let numerator = (c.b0 + c.b1 * c1 + c.b2 * c2, c.b1 * s1 + c.b2 * s2);
+    let denominator = (1.0 + c.a1 * c1 + c.a2 * c2, c.a1 * s1 + c.a2 * s2);
+    numerator.0.hypot(numerator.1) / denominator.0.hypot(denominator.1)
 }
 
-impl Biquad {
-    fn new(coefficients: Coefficients) -> Self {
-        Self {
-            coefficients,
-            history: [[0.0; 4]; CHANNELS],
-        }
-    }
-
-    fn process(&mut self, channel: usize, input: f64) -> f64 {
-        let c = self.coefficients;
-        let [x1, x2, y1, y2] = self.history[channel];
-        let output = c.b0 * input + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
-        // Denormals and silence settle at exact zero.
-        let output = if output.abs() < 1e-20 { 0.0 } else { output };
-        self.history[channel] = [input, x1, output, y1];
-        output
-    }
-
-    fn reset(&mut self) {
-        self.history = [[0.0; 4]; CHANNELS];
-    }
-}
+/// Below this level a frame counts as silent; a silent frame with silent
+/// output resets the filters, so they rest at exact zero.
+const SILENCE: f32 = 1e-9;
 
 /// The EQ and filter settings of a deck.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -262,7 +153,7 @@ impl Tone {
         }
     }
 
-    fn coefficients(self) -> [Coefficients; 5] {
+    fn coefficients(self) -> [Coefficients<f64>; 5] {
         let eq = self.eq.map(|db| f64::from(db.clamp(EQ_MIN_DB, EQ_MAX_DB)));
         let filter = f64::from(self.filter.clamp(-1.0, 1.0));
         let low_pass =
@@ -272,26 +163,30 @@ impl Tone {
         let q =
             FILTER_Q_NEUTRAL + (FILTER_Q_TURNED - FILTER_Q_NEUTRAL) * (filter.abs() * 5.0).min(1.0);
         [
-            Coefficients::low_shelf(EQ_LOW_HZ, eq[0]),
-            Coefficients::peaking(EQ_MID_HZ, EQ_MID_Q, eq[1]),
-            Coefficients::high_shelf(EQ_HIGH_HZ, eq[2]),
-            Coefficients::low_pass(low_pass, q),
-            Coefficients::high_pass(high_pass, q),
+            coefficients(Type::LowShelf(eq[0]), EQ_LOW_HZ, SHELF_Q),
+            coefficients(Type::PeakingEQ(eq[1]), EQ_MID_HZ, EQ_MID_Q),
+            coefficients(Type::HighShelf(eq[2]), EQ_HIGH_HZ, SHELF_Q),
+            coefficients(Type::LowPass, low_pass, q),
+            coefficients(Type::HighPass, high_pass, q),
         ]
     }
 }
 
-/// Three EQ bands, then the filter's low-pass and high-pass, in series.
+/// Three EQ bands, then the filter's low-pass and high-pass, in series, each a
+/// direct form I biquad per channel (that form tolerates coefficients changing
+/// between blocks).
 #[derive(Clone, Debug)]
 pub struct ToneFilter {
-    stages: [Biquad; 5],
+    stages: [[DirectForm1<f64>; CHANNELS]; 5],
     tone: Tone,
 }
 
 impl Default for ToneFilter {
     fn default() -> Self {
         Self {
-            stages: Tone::NEUTRAL.coefficients().map(Biquad::new),
+            stages: Tone::NEUTRAL
+                .coefficients()
+                .map(|coefficients| [DirectForm1::<f64>::new(coefficients); CHANNELS]),
             tone: Tone::NEUTRAL,
         }
     }
@@ -299,8 +194,8 @@ impl Default for ToneFilter {
 
 impl ToneFilter {
     pub fn reset(&mut self) {
-        for stage in &mut self.stages {
-            stage.reset();
+        for filter in self.stages.iter_mut().flatten() {
+            filter.reset_state();
         }
     }
 
@@ -313,23 +208,32 @@ impl ToneFilter {
         let samples = frame.len() / CHANNELS;
         let blocks = samples.div_ceil(BLOCK).max(1);
         let moving = from != to;
+        let silent_input = frame.iter().all(|sample| sample.abs() < SILENCE);
         for (index, block) in frame.chunks_mut(BLOCK * CHANNELS).enumerate() {
             if moving || index == 0 {
                 let share = (index + 1) as f32 / blocks as f32;
                 let coefficients = from.mix(to, share).coefficients();
                 for (stage, coefficients) in self.stages.iter_mut().zip(coefficients) {
-                    stage.coefficients = coefficients;
+                    for filter in stage {
+                        filter.update_coefficients(coefficients);
+                    }
                 }
             }
             for samples in block.as_chunks_mut::<CHANNELS>().0 {
                 for (channel, sample) in samples.iter_mut().enumerate() {
                     let mut value = f64::from(*sample);
                     for stage in &mut self.stages {
-                        value = stage.process(channel, value);
+                        value = stage[channel].run(value);
                     }
                     *sample = value as f32;
                 }
             }
+        }
+        // A silent frame whose filter tails have died away resets the
+        // filters, which then rest at exact zero.
+        if silent_input && frame.iter().all(|sample| sample.abs() < SILENCE) {
+            self.reset();
+            frame.fill(0.0);
         }
     }
 
@@ -338,7 +242,7 @@ impl ToneFilter {
     fn response(tone: Tone, hz: f64) -> f64 {
         tone.coefficients()
             .iter()
-            .map(|stage| stage.response(hz))
+            .map(|stage| response(stage, hz))
             .product()
     }
 }
@@ -620,6 +524,44 @@ mod tests {
             largest < 5e-3,
             "neutral filter changed samples by {largest}"
         );
+    }
+
+    #[test]
+    fn filter_tails_die_away_and_silence_rests_at_zero() {
+        // A loud low tone through a boosted low shelf and a turned filter,
+        // then silence: the tails ring for a while, then frames are exactly zero.
+        let tone = Tone {
+            eq: [EQ_MAX_DB, 0.0, 0.0],
+            filter: -0.5,
+        };
+        let mut filter = ToneFilter::default();
+        for frame in 0..20 {
+            let mut samples: Vec<f32> = (0..FRAME)
+                .flat_map(|index| {
+                    let t = (frame * FRAME + index) as f64 / RATE;
+                    [(std::f64::consts::TAU * 80.0 * t).sin() as f32 * 0.9; CHANNELS]
+                })
+                .collect();
+            filter.process(&mut samples, tone);
+        }
+        let mut silence = vec![0.0f32; FRAME * CHANNELS];
+        filter.process(&mut silence, tone);
+        assert!(
+            silence.iter().any(|sample| *sample != 0.0),
+            "the tail rings on"
+        );
+        let mut zero_from = None;
+        for frame in 0..500 {
+            let mut silence = vec![0.0f32; FRAME * CHANNELS];
+            filter.process(&mut silence, tone);
+            let zero = silence.iter().all(|sample| *sample == 0.0);
+            match (zero, zero_from) {
+                (true, None) => zero_from = Some(frame),
+                (false, Some(_)) => panic!("silence started again at frame {frame}"),
+                _ => {}
+            }
+        }
+        assert!(zero_from.is_some_and(|frame| frame < 100), "{zero_from:?}");
     }
 
     #[test]

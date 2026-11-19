@@ -266,9 +266,10 @@ It transports opaque library bytes; it does not call a decoder, voice classifier
 or encoder, and does not link one: the codec crates belong to the separate
 `nuschl-musicbot-codec-worker`, which `cargo-deny` alone allows to depend on them.
 The parent's own signal processing works on the validated 48 kHz PCM the decode
-children return: the volume and ducking gain, and in DJ mode the mix, EQ and
-filter biquads, the tempo resampler and a limiter, all first-party safe Rust on
-plain sample arrays (`apps/musicbot/src/player/dsp.rs`).
+children return: the volume and ducking gain, and in DJ mode the mix, the tempo
+resampler and a limiter in first-party safe Rust, and the EQ and filter as
+direct form I biquads with cookbook coefficients from the safe `biquad` crate
+(`apps/musicbot/src/player/dsp.rs`).
 The bot starts that worker only from its fixed place beside itself
 (`<prefix>/libexec/nuschl-musicbot/`; a missing worker fails the operation) as
 `--codec-worker <role>`, in one fixed role, through versioned, size-capped IPC
