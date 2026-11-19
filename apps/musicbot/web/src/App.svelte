@@ -3,12 +3,13 @@
   import { onMount, tick } from "svelte";
   import { store } from "./store.svelte.js";
   import { postJSON } from "./api.js";
-  import { listening } from "./listening.svelte.js";
+  import { cueListening, listening } from "./listening.svelte.js";
   import { buildRoute, handlesSpace, routeForLibrary } from "./logic.js";
   import Browse from "./components/Browse.svelte";
   import Channels from "./components/Channels.svelte";
   import QueuePanel from "./components/QueuePanel.svelte";
   import HistoryPanel from "./components/HistoryPanel.svelte";
+  import DjPanel from "./components/DjPanel.svelte";
   import PlayerBar from "./components/PlayerBar.svelte";
   import BigScreen from "./components/BigScreen.svelte";
   import Icon from "./components/Icon.svelte";
@@ -28,6 +29,7 @@
   const links = $derived([
     { name: "Queue", icon: "queue", route: { view: "queue" }, views: ["queue"] },
     { name: "History", icon: "queue", route: { view: "history" }, views: ["history"] },
+    { name: "DJ", icon: "decks", route: { view: "dj" }, views: ["dj"] },
     { name: "Albums", icon: "album", route: { view: "albums", library: store.library, list: "newest" }, views: ["albums", "album", "song"] },
     { name: "Artists", icon: "artist", route: { view: "artists", library: store.library }, views: ["artists", "artist"] },
     { name: "Genres", icon: "genre", route: { view: "genres", library: store.library }, views: ["genres", "genre"] },
@@ -38,6 +40,7 @@
 
   onMount(() => store.start());
   listening.attach();
+  cueListening.attach();
   $effect(() => {
     if (store.invalid || !store.snapshot) bigScreen = false;
   });
@@ -141,6 +144,8 @@
             <QueuePanel />
           {:else if route.view === "history"}
             <HistoryPanel />
+          {:else if route.view === "dj"}
+            <DjPanel />
           {:else if route.view === "channels"}
             <Channels />
           {:else if route.view === "add"}

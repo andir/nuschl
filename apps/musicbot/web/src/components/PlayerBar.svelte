@@ -5,6 +5,7 @@
     const current = player?.current ?? null;
     if (!player) return null;
     if (player.error) return `Playback error: ${player.error}`;
+    if (player.dj) return player.paused ? "DJ mode, paused" : "DJ mode";
     if (!current) return null;
     if (player.paused) return "Paused";
     if (player.listeners === 0) return "Waiting for listeners";
@@ -16,7 +17,7 @@
 
 <script>
   import { store } from "../store.svelte.js";
-  import { buildRoute } from "../logic.js";
+  import { buildRoute, leadDeck } from "../logic.js";
   import { carriesItem, droppedItem } from "../dnd.js";
   import { listening } from "../listening.svelte.js";
   import Cover from "./Cover.svelte";
@@ -33,7 +34,9 @@
   const player = $derived(store.player);
   const players = $derived(store.snapshot?.players ?? []);
   const current = $derived(player?.current ?? null);
-  const track = $derived(current?.entry.track ?? null);
+  const djState = $derived(player?.dj ?? null);
+  const lead = $derived(leadDeck(djState));
+  const track = $derived(current?.entry.track ?? (lead === null ? null : djState.decks[lead].entry.track));
   const volume = $derived(store.volume(index));
   const queueStatus = $derived(playerStatus(player));
   // Browser listening only gets the line when the queue has nothing to report.
@@ -110,9 +113,13 @@
         <Icon name={player?.paused ? "play" : "pause"} size={22} />
       </button>
       <div class="controls-end">
-        <button class="icon-btn" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
-          <Icon name="skip" />
-        </button>
+        {#if djState}
+          <a class="icon-btn" href={buildRoute({ view: "dj" })} aria-label="Open the decks" title="DJ decks"><Icon name="decks" /></a>
+        {:else}
+          <button class="icon-btn" disabled={!current} aria-label="Skip" title="Skip" onclick={() => store.skip(index)}>
+            <Icon name="skip" />
+          </button>
+        {/if}
         <button class="icon-btn" aria-label="Open big screen" aria-haspopup="dialog" title="Big screen" onclick={(event) => { store.bigScreenLyrics = false; onexpand(event); }}>
           <Icon name="expand" />
         </button>
@@ -121,7 +128,7 @@
         </button>
       </div>
     </div>
-    <Progress player={index} {current} />
+    {#if !djState}<Progress player={index} {current} />{/if}
     <span class="status" class:error={statusError} role="status" title={status ?? ""}>{status ?? ""}</span>
   </div>
 

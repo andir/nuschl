@@ -9,6 +9,8 @@ import {
   shareRoute, shareRoot, shareUrl, addressRoute, adoptSharedRoute,
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
   groupPlaylists, editablePlaylists, lyricLineAt, artistJumps, suggestionQuery, suggestionStep, filterGenres,
+  deckPosition, deckBpm, crossfadeGains, leadDeck, transitionPosition, decibelText, filterText, tempoText,
+  crossfaderText, paced,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -134,6 +136,7 @@ test("routes round trip, including awkward ids", () => {
     { view: "queue" },
     { view: "channels" },
     { view: "history" },
+    { view: "dj" },
     { view: "albums", library: 1, list: "starred" },
     { view: "artists", library: 0 },
     { view: "playlists", library: 3 },
@@ -641,4 +644,108 @@ test("the highlighted suggestion steps and wraps", () => {
   assert.equal(suggestionStep(1, 1, 4), 2);
   assert.equal(suggestionStep(7, 1, 4), 0);
   assert.equal(suggestionStep(0, 1, 0), -1);
+});
+
+test("deck positions run at the deck's tempo and stop at the song's end", () => {
+  assert.equal(deckPosition(1000, true, 8, 0, 1000, null), 2080);
+  assert.equal(deckPosition(1000, true, -8, 500, 1500, null), 1920);
+  assert.equal(deckPosition(1000, false, 8, 0, 1000, null), 1000);
+  assert.equal(deckPosition(9000, true, 0, 0, 5000, 10), 10000);
+  assert.equal(deckPosition(1000, true, Number.NaN, 0, 1000, null), 2000);
+});
+
+test("deck BPM follows the tempo and stays unknown without a library value", () => {
+  assert.equal(deckBpm(120, 4), 124.8);
+  assert.equal(deckBpm(128, -8), 117.8);
+  assert.equal(deckBpm(174, 0), 174);
+  for (const unknown of [null, undefined, 0, -3, Number.NaN]) assert.equal(deckBpm(unknown, 0), null);
+});
+
+test("crossfader gains match the bot's curves", () => {
+  const [a, b] = crossfadeGains(0, "smooth");
+  assert.ok(Math.abs(a - Math.SQRT1_2) < 1e-9 && Math.abs(b - Math.SQRT1_2) < 1e-9);
+  assert.deepEqual(crossfadeGains(-1, "smooth"), [1, 0]);
+  assert.deepEqual(crossfadeGains(-5, "smooth"), [1, 0]);
+  assert.deepEqual(crossfadeGains(0, "cut"), [1, 1]);
+  assert.deepEqual(crossfadeGains(-1, "cut"), [1, 0]);
+  assert.deepEqual(crossfadeGains(1, "cut"), [0, 1]);
+  const [full, half] = crossfadeGains(-0.96, "cut");
+  assert.equal(full, 1);
+  assert.ok(Math.abs(half - 0.5) < 1e-9);
+});
+
+test("the lead deck is the playing one, then the louder one, deck A on a tie", () => {
+  const deck = (playing, volume = 100) => ({ entry: { id: 1 }, playing, volume });
+  assert.equal(leadDeck({ crossfader: -1, curve: "smooth", decks: [deck(false), deck(true)] }), 1);
+  assert.equal(leadDeck({ crossfader: -1, curve: "smooth", decks: [deck(true), deck(true)] }), 0);
+  assert.equal(leadDeck({ crossfader: 0, curve: "smooth", decks: [deck(true, 40), deck(true)] }), 1);
+  assert.equal(leadDeck({ crossfader: 0, curve: "smooth", decks: [deck(false), deck(false)] }), 0);
+  assert.equal(leadDeck({ crossfader: 0, curve: "smooth", decks: [{ entry: null }, { entry: null }] }), null);
+  assert.equal(leadDeck(null), null);
+});
+
+test("a running transition moves the crossfader to its deck in the remaining time", () => {
+  assert.equal(transitionPosition(-1, 1, 0, 2000, 1000), 0);
+  assert.equal(transitionPosition(0, 1, 1000, 2000, 1000), 1);
+  assert.equal(transitionPosition(0, 1, 1000, 2000, 5000), 1);
+  assert.equal(transitionPosition(0.5, 0, 0, 1000, -20), 0.5);
+  assert.equal(transitionPosition(0.2, 0, 3000, 3000, 0), -1);
+});
+
+test("DJ control values read as text", () => {
+  assert.equal(decibelText(0), "0.0 dB");
+  assert.equal(decibelText(3.5), "+3.5 dB");
+  assert.equal(decibelText(-2.4), "−2.5 dB");
+  assert.equal(decibelText(-26), "−26 dB, cut");
+  assert.equal(filterText(0), "Neutral");
+  assert.equal(filterText(0.004), "Neutral");
+  assert.equal(filterText(-0.4), "Low-pass 40 %");
+  assert.equal(filterText(1), "High-pass 100 %");
+  assert.equal(tempoText(2.5), "+2.50 %");
+  assert.equal(tempoText(0), "0.00 %");
+  assert.equal(tempoText(-8), "−8.00 %");
+  assert.equal(crossfaderText(0), "Centre");
+  assert.equal(crossfaderText(-1), "Deck A only");
+  assert.equal(crossfaderText(1), "Deck B only");
+  assert.equal(crossfaderText(0.25), "25 % towards deck B");
+});
+
+test("paced sends the newest value, one request at a time and at most once per interval", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    const sent = [];
+    let finish = null;
+    const send = paced((value) => {
+      sent.push(value);
+      return new Promise((resolve) => { finish = resolve; });
+    }, 33);
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+    send(1);
+    assert.deepEqual(sent, [1]);
+    send(2);
+    send(3);
+    mock.timers.tick(100);
+    assert.deepEqual(sent, [1], "the next request waits for the reply");
+    finish();
+    await settle();
+    assert.deepEqual(sent, [1, 3], "values that waited collapse into the newest");
+    finish();
+    await settle();
+    assert.equal(send.idle(), true);
+    send(4);
+    assert.deepEqual(sent, [1, 3]);
+    mock.timers.tick(32);
+    assert.deepEqual(sent, [1, 3]);
+    mock.timers.tick(1);
+    assert.deepEqual(sent, [1, 3, 4]);
+    finish();
+    await settle();
+    send(5);
+    send.cancel();
+    mock.timers.tick(100);
+    assert.deepEqual(sent, [1, 3, 4]);
+    assert.equal(send.idle(), true);
+  } finally {
+    mock.timers.reset();
+  }
 });

@@ -111,7 +111,7 @@ function libraryIndex(text) {
 
 /**
  * Parses a location hash into a route object:
- * `{ view: "queue" | "channels" | "history" }`, `{ view: "albums", library, list }`,
+ * `{ view: "queue" | "channels" | "history" | "dj" }`, `{ view: "albums", library, list }`,
  * `{ view: "artists" | "playlists" | "genres", library }`, `{ view: "genre", library, name }`,
  * `{ view: "album" | "artist" | "playlist" | "song" | "similar", library, id, namespace? }`,
  * `{ view: "path", library, from, to, namespace? }`, `{ view: "search", q }`,
@@ -142,6 +142,7 @@ export function parseRoute(hash) {
     case "channels":
     case "history":
     case "requests":
+    case "dj":
       return { view };
     case "albums": {
       const list = params.get("list");
@@ -182,6 +183,8 @@ export function buildRoute(route) {
   switch (route.view) {
     case "history":
       return "#/history";
+    case "dj":
+      return "#/dj";
     case "requests":
       return "#/requests";
     case "channels":
@@ -564,4 +567,135 @@ export function suggestionStep(active, delta, length) {
   if (!(length > 0)) return -1;
   if (active < 0 || active >= length) return delta > 0 ? 0 : length - 1;
   return (active + delta + length) % length;
+}
+
+// DJ mode. The ranges match the bot's (docs/musicbot.md, "DJ mode").
+export const DJ_EQ_MIN = -26;
+export const DJ_EQ_MAX = 6;
+export const DJ_TEMPO_RANGES = [8, 16];
+export const DJ_TRANSITION_SECONDS = [2, 4, 8, 16, 30];
+/** Continuous DJ controls send at most this often (about 30 a second). */
+export const DJ_SEND_MS = 33;
+
+/**
+ * Song position in ms of a DJ deck: like interpolatePosition, with song time
+ * running `tempo` percent faster than real time.
+ */
+export function deckPosition(positionMs, advancing, tempo, receivedAt, now, durationSeconds) {
+  const rate = 1 + (Number.isFinite(tempo) ? tempo : 0) / 100;
+  return interpolatePosition(positionMs, advancing, receivedAt, receivedAt + Math.max(0, now - receivedAt) * rate, durationSeconds);
+}
+
+/** The BPM of a song from the library at `tempo` percent, to one decimal, or null when unknown. */
+export function deckBpm(bpm, tempo) {
+  if (!(Number.isFinite(bpm) && bpm > 0)) return null;
+  return Math.round(bpm * (1 + (Number.isFinite(tempo) ? tempo : 0) / 100) * 10) / 10;
+}
+
+/** The gains of decks A and B for a crossfader position (−1 A … 1 B) and curve, as the bot mixes. */
+export function crossfadeGains(position, curve) {
+  const travel = (clamp(Number(position) || 0, -1, 1) + 1) / 2;
+  if (curve === "cut") return [Math.min(1, (1 - travel) / 0.04), Math.min(1, travel / 0.04)];
+  return [Math.max(0, Math.cos(travel * Math.PI / 2)), Math.max(0, Math.sin(travel * Math.PI / 2))];
+}
+
+/** The deck the room hears most, as the bot decides: playing first, then louder, A on a tie; null without songs. */
+export function leadDeck(dj) {
+  if (!dj?.decks) return null;
+  const crossfade = crossfadeGains(dj.crossfader, dj.curve);
+  let lead = null;
+  let best = null;
+  dj.decks.forEach((deck, index) => {
+    if (!deck.entry) return;
+    const score = [deck.playing ? 1 : 0, (deck.volume / 100) ** 2 * crossfade[index]];
+    if (best === null || score[0] > best[0] || (score[0] === best[0] && score[1] > best[1])) {
+      best = score;
+      lead = index;
+    }
+  });
+  return lead;
+}
+
+/**
+ * The crossfader position during a transition `sinceMs` after a state that
+ * reported `position` at `elapsedMs` of `durationMs`, fading to deck `to`.
+ */
+export function transitionPosition(position, to, elapsedMs, durationMs, sinceMs) {
+  const target = to === 0 ? -1 : 1;
+  const left = durationMs - elapsedMs;
+  if (!(left > 0)) return target;
+  const share = clamp(Math.max(0, sinceMs) / left, 0, 1);
+  return position + (target - position) * share;
+}
+
+const signed = (value, digits) => `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(digits)}`;
+
+/** Spoken and shown value of an EQ band. */
+export function decibelText(db) {
+  return db <= DJ_EQ_MIN ? `${signed(DJ_EQ_MIN, 0)} dB, cut` : `${signed(Math.round(db * 2) / 2, 1)} dB`;
+}
+
+/** Spoken and shown value of the filter knob (−1 low-pass … 1 high-pass). */
+export function filterText(value) {
+  const percent = Math.round(Math.abs(value) * 100);
+  if (percent === 0) return "Neutral";
+  return `${value < 0 ? "Low-pass" : "High-pass"} ${percent} %`;
+}
+
+/** Spoken and shown tempo in percent. */
+export function tempoText(percent) {
+  return `${signed(Math.round(percent * 100) / 100, 2)} %`;
+}
+
+/** Spoken and shown crossfader position (−1 A … 1 B). */
+export function crossfaderText(position) {
+  const percent = Math.round(Math.abs(position) * 100);
+  if (percent === 0) return "Centre";
+  if (percent === 100) return position < 0 ? "Deck A only" : "Deck B only";
+  return `${percent} % towards deck ${position < 0 ? "A" : "B"}`;
+}
+
+/**
+ * Calls `send` (which may return a promise) with the latest arguments, one
+ * call at a time and at most one per `ms`; arguments that arrive meanwhile
+ * collapse into the newest. Requests of one control so arrive in order.
+ * `cancel()` drops a waiting value; `idle()` is true with nothing waiting or running.
+ */
+export function paced(send, ms, now = () => Date.now()) {
+  let pending = null;
+  let busy = false;
+  let last = -Infinity;
+  let timer = null;
+  async function pump() {
+    if (busy || pending === null || timer !== null) return;
+    const wait = last + ms - now();
+    if (wait > 0) {
+      timer = setTimeout(() => {
+        timer = null;
+        pump();
+      }, wait);
+      return;
+    }
+    const args = pending;
+    pending = null;
+    busy = true;
+    last = now();
+    try {
+      await send(...args);
+    } finally {
+      busy = false;
+      pump();
+    }
+  }
+  const call = (...args) => {
+    pending = args;
+    pump();
+  };
+  call.cancel = () => {
+    pending = null;
+    clearTimeout(timer);
+    timer = null;
+  };
+  call.idle = () => !busy && pending === null;
+  return call;
 }

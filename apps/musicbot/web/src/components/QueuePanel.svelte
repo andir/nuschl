@@ -1,6 +1,7 @@
 <!-- SPDX-License-Identifier: EUPL-1.2 -->
 <script>
   import { store } from "../store.svelte.js";
+  import { dj } from "../dj.svelte.js";
   import { buildRoute, formatDuration, gapIndex, moveTarget, stepTarget } from "../logic.js";
   import { carriesEntry, carriesItem, droppedEntry, droppedItem, leftElement, startEntryDrag } from "../dnd.js";
   import Cover from "./Cover.svelte";
@@ -13,6 +14,7 @@
   const current = $derived(player?.current ?? null);
   const players = $derived(store.snapshot?.players ?? []);
   const attached = $derived(store.snapshot?.channels.filter((channel) => channel.player === selected).length ?? 0);
+  const djState = $derived(player?.dj ?? null);
   let root = $state();
   let gap = $state(null);
   let dragged = $state(null);
@@ -73,7 +75,10 @@
 <section class="queue-panel" class:compact bind:this={root} aria-labelledby="{id}-title" ondragover={dragover} ondrop={drop} ondragleave={(event) => { if (leftElement(event, root)) gap = null; }}>
   <div class="queue-heading">
     <h1 id="{id}-title">Queue</h1>
-    {#if queue.length}<button class="btn small" onclick={() => store.clear(selected)}>Clear upcoming</button>{/if}
+    <div class="heading-actions">
+      {#if player}<a class="btn small" href={buildRoute({ view: "dj" })} class:active={djState}><Icon name="decks" size={16} />{djState ? "Decks" : "DJ mode"}</a>{/if}
+      {#if queue.length}<button class="btn small" onclick={() => store.clear(selected)}>Clear upcoming</button>{/if}
+    </div>
   </div>
   {#if players.length}
     <label class="queue-choice"><span class="visually-hidden">Selected queue</span>
@@ -101,6 +106,13 @@
             {/if}
           </div>
         </div>
+      {:else if djState}
+        <ul class="deck-list">
+          {#each djState.decks as deck, i (i)}
+            <li><span class="badge accent">{i === 0 ? "A" : "B"}</span>{#if deck.entry}<span class="row-title">{deck.entry.track.title}</span><span class="muted secondary">{deck.playing ? "playing" : "paused"}</span>{:else}<span class="muted">empty</span>{/if}</li>
+          {/each}
+        </ul>
+        <a class="similar-link" href={buildRoute({ view: "dj" })}><Icon name="decks" size={16} /> Open the decks</a>
       {:else}<p class="muted">Nothing is playing. Add music from the library.</p>{/if}
     </div>
     <div class="upcoming-heading"><h2 class="eyebrow">Up next</h2><span class="muted small">Drag to reorder</span></div>
@@ -119,6 +131,11 @@
           </div>
           <span class="row-duration">{formatDuration(entry.track.duration)}</span>
           <div class="row-actions">
+            {#if djState}
+              {#each ["A", "B"] as letter, deck (letter)}
+                <button class="icon-btn deck-load" aria-label="Load {entry.track.title} onto deck {letter}" title="Load onto deck {letter}" onclick={() => dj.load(selected, deck, { entry: entry.id })}>{letter}</button>
+              {/each}
+            {/if}
             <button class="icon-btn" disabled={i === 0} aria-label="Move {entry.track.title} to play next" title="Play next" onclick={() => store.move(selected, entry.id, 0)}><Icon name="next" size={18} /></button>
             <button class="icon-btn" aria-label="Remove {entry.track.title}" title="Remove from queue" onclick={() => store.remove(selected, entry.id)}><Icon name="remove" size={18} /></button>
           </div>
@@ -134,9 +151,14 @@
 <style>
   .queue-panel { min-width: 0; }
   .queue-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 1rem; }
+  .heading-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end; }
   h1 { margin: 0; }
   h2 { margin: 1.25rem 0 0.5rem; }
   .btn.small { padding: 0.3rem 0.75rem; }
+  .btn.active { border-color: var(--accent); color: var(--accent); }
+  .deck-list { list-style: none; margin: 0 0 0.4rem; padding: 0; display: grid; gap: 0.35rem; }
+  .deck-list li { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+  .deck-load { font-weight: 700; font-size: 0.85rem; }
   .queue-choice select { width: 100%; }
   .queue-meta { font-size: 0.8rem; font-variant-numeric: tabular-nums; }
   .now-playing { margin-top: 1rem; }
