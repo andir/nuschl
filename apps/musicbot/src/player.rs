@@ -11,7 +11,10 @@ mod dj;
 mod dsp;
 
 use axum::body::Bytes;
-pub use dj::{DECKS, Dj};
+pub use dj::{
+    DECKS, DeckSong, Dj, DjError, MAX_TRANSITION_SECONDS, MIN_TRANSITION_SECONDS, TEMPO_RANGES,
+};
+pub use dsp::{Curve, EQ_MAX_DB, EQ_MIN_DB};
 use nuschl_ipc::musicbot::{Client, Role};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -414,6 +417,8 @@ impl Feed {
 pub(crate) enum Listen {
     /// What the room hears.
     Room,
+    /// One deck before its channel fader.
+    Cue(usize),
 }
 
 /// A browser's live PCM subscription. Dropping it releases its listener.
@@ -575,6 +580,7 @@ impl Player {
     fn feed(&self, stream: Listen) -> &Feed {
         match stream {
             Listen::Room => &self.browser,
+            Listen::Cue(deck) => &self.cues[deck.min(DECKS - 1)],
         }
     }
 
