@@ -112,6 +112,7 @@ fn entry(id: u64) -> Entry {
             suffix: Some("flac".into()),
             content_type: Some("audio/flac".into()),
             cover_art: None,
+            bpm: None,
         },
     }
 }

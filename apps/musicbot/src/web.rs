@@ -8,7 +8,7 @@ use crate::{
     Bot,
     covers::{CoverKey, IMPORT_NAMESPACE, ImageKey},
     import,
-    player::{BrowserSubscription, Ducking, MAX_DUCK_HOLD},
+    player::{BrowserSubscription, Ducking, Listen, MAX_DUCK_HOLD},
     subsonic::{
         self, Album, AlbumList, Artist, Genres, Library, LibraryIdentity, Lyrics, MAX_GENRE_NAME,
         SongDetails, SonicMatch, Track,
@@ -1229,7 +1229,7 @@ fn listen_response(
         )
     })?;
     let lease = ListenLease {
-        subscription: player.subscribe_browser(),
+        subscription: player.subscribe_browser(Listen::Room),
         _permit: permit,
     };
     // Only one record may leave the shared live fanout before the body polls.
@@ -1490,8 +1490,7 @@ async fn command(
                     let identity = bot.libraries[library].identity();
                     let state = player.state();
                     let playing = state
-                        .current
-                        .as_ref()
+                        .now_playing()
                         .map(|playing| (playing.source.as_ref(), playing.entry.track.id.as_str()));
                     continue_path(tracks, playing, &identity)
                 }

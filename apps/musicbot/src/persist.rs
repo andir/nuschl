@@ -99,7 +99,8 @@ fn capture(bot: &Bot) -> Saved {
                     hold_ms: state.ducking.hold.as_millis() as u64,
                     sensitivity: state.ducking.sensitivity,
                 },
-                current: state.current.as_ref().map(|playing| SavedCurrent {
+                // In DJ mode, the deck song the room hears; DJ mode itself starts off.
+                current: state.now_playing().map(|playing| SavedCurrent {
                     entry: entry(&playing.entry, playing.source.as_ref()),
                     position_ms: playing.elapsed().as_millis() as u64,
                     started_at_ms: playing.started_at_ms,
@@ -307,7 +308,7 @@ pub async fn keep(bot: std::sync::Arc<Bot>) {
             _ = interval.tick() => {
                 if !bot.players.iter().any(|player| {
                     let state = player.state();
-                    state.current.is_some() && !state.paused && player.listeners() > 0
+                    state.now_playing().is_some() && !state.paused && player.listeners() > 0
                 }) { continue; }
             }
         }

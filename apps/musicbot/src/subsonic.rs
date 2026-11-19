@@ -76,6 +76,9 @@ impl Error {
     }
 }
 
+/// The largest BPM taken from a library; larger values read as unknown.
+const MAX_BPM: u32 = 999;
+
 /// A song in one of the libraries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
@@ -95,6 +98,9 @@ pub struct Track {
     pub content_type: Option<String>,
     /// For `getCoverArt`.
     pub cover_art: Option<String>,
+    /// Beats per minute, from OpenSubsonic's `bpm` (1 to 999).
+    #[serde(default)]
+    pub bpm: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1300,6 +1306,8 @@ struct Song {
     play_count: Option<u64>,
     #[serde(default, deserialize_with = "optional_identifier")]
     cover_art: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    bpm: Option<Scalar>,
 }
 
 /// What a song's page shows besides the queue fields.
@@ -1358,6 +1366,10 @@ impl Song {
             suffix: self.suffix,
             content_type: self.content_type,
             cover_art: self.cover_art,
+            bpm: self
+                .bpm
+                .and_then(Scalar::count)
+                .filter(|bpm| (1..=MAX_BPM).contains(bpm)),
         }
     }
 }
@@ -1710,6 +1722,33 @@ pub(crate) mod tests {
         .song
         .unwrap()
         .track(0)
+    }
+
+    #[test]
+    fn bpm_comes_from_opensubsonic_songs_when_it_is_a_sane_whole_number() {
+        let bpm = |value: &str| {
+            let reply = format!(
+                r#"{{"subsonic-response":{{"status":"ok","song":{{"id":"s","bpm":{value}}}}}}}"#
+            );
+            parse_reply(reply.as_bytes())
+                .unwrap()
+                .song
+                .unwrap()
+                .track(0)
+                .bpm
+        };
+        assert_eq!(bpm("128"), Some(128));
+        assert_eq!(bpm(r#""174""#), Some(174));
+        // Navidrome sends 0 for songs without a BPM tag.
+        for unknown in ["0", "1000", "-5", "120.5", "null", r#""fast""#, "[]"] {
+            assert_eq!(bpm(unknown), None, "{unknown}");
+        }
+        assert_eq!(track().bpm, None);
+        // Queues saved before BPMs existed still load.
+        let saved: Track =
+            serde_json::from_str(r#"{"library":0,"id":"s","title":"t","artist":null,"album":null,"album_id":null,"artist_id":null,"duration":null,"track":null,"suffix":null,"content_type":null,"cover_art":null}"#)
+                .unwrap();
+        assert_eq!(saved.bpm, None);
     }
 
     #[test]

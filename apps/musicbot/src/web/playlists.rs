@@ -404,8 +404,7 @@ fn songs_to_add(bot: &Bot, body: &Addition) -> Result<Songs, ApiError> {
                 .ok_or_else(|| bad("no such queue"))?;
             let state = player.state();
             let playing = state
-                .current
-                .as_ref()
+                .now_playing()
                 .ok_or_else(|| bad("Nothing is playing."))?;
             let identity = bot.libraries[body.library].identity();
             if playing.source.as_ref() != Some(&identity) {
