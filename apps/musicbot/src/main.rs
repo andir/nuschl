@@ -8,7 +8,11 @@ mod import;
 mod library_keys;
 mod mumble;
 mod persist;
+#[cfg_attr(not(test), expect(dead_code, reason = "the DJ engine uses it from the next commit"))]
+mod bpm;
 mod player;
+#[cfg_attr(not(test), expect(dead_code, reason = "the DJ engine uses it from the next commit"))]
+mod spectrum;
 mod playlists;
 mod scrobble;
 mod subsonic;
