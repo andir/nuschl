@@ -12,6 +12,11 @@ import {
   deckPosition, deckBpm, crossfadeGains, leadDeck, transitionPosition, decibelText, filterText, tempoText,
   crossfaderText, paced, djControls, parseMidi, learnBinding, relativeDelta, midiPressed, midiFraction,
   controlValue, controlFraction, midiStorageKey, parseMapping, serializeMapping, boundControls, bindingText,
+  DJ_BEAT_LOOPS, beatsText, DJ_KEY_GLIDES, DJ_KEY_GLIDE_DELAY_MS, glideValue, keyStep, eqKillTarget, djKeyActions,
+  defaultKeyBindings, keyLabel, keyFromEvent, keyMatches, findConflicts, bindKey, parseKeyBindings,
+  serializeKeyBindings, typingTarget,
+  SPECTRUM_MAX_COLUMNS, levelDb, levelHeight, waveWindow, timeX, xTime, rangesToFetch, findRange, insertRange,
+  pruneRanges, parseColour, heatColour, gridTicks,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -753,7 +758,7 @@ test("paced sends the newest value, one request at a time and at most once per i
 
 test("MIDI can drive every DJ control once", () => {
   const controls = djControls();
-  assert.equal(controls.length, 30);
+  assert.equal(controls.length, 62);
   assert.equal(new Set(controls.map((control) => control.id)).size, controls.length);
   for (const control of controls) assert.ok(control.kind === "range" || control.kind === "button", control.id);
   assert.deepEqual(controls.filter((control) => control.kind === "range" && !control.center).map((control) => control.id), ["0.volume", "1.volume"]);
@@ -868,4 +873,216 @@ test("messages reach their bound controls, 14-bit ones through both halves", () 
   assert.equal(bindingText(mapping["1.tempo"]), "CC 2, channel 2, 14-bit");
   assert.equal(bindingText(mapping["0.play"]), "Note 7, channel 1");
   assert.equal(bindingText(undefined), "—");
+});
+
+test("MIDI offers loops of every beat length on both decks", () => {
+  const ids = new Set(djControls().map((control) => control.id));
+  for (const deck of [0, 1]) {
+    for (const name of ["loopIn", "loopOut", "loopToggle", "loopHalve", "loopDouble", "loopBack", "loopForward", "quantize"]) assert.ok(ids.has(`${deck}.${name}`), name);
+    for (const beats of DJ_BEAT_LOOPS) assert.ok(ids.has(`${deck}.beatLoop.${beats}`), String(beats));
+  }
+  assert.deepEqual(DJ_BEAT_LOOPS.map(beatsText), ["1/4 beat", "1/2 beat", "1 beat", "2 beats", "4 beats", "8 beats", "16 beats", "32 beats"]);
+});
+
+test("default DJ keys cover every action once, with a deck B mirror of deck A", () => {
+  const actions = djKeyActions();
+  assert.equal(new Set(actions.map((action) => action.id)).size, actions.length);
+  const defaults = defaultKeyBindings(actions);
+  assert.deepEqual(findConflicts(defaults), []);
+  assert.ok(Object.values(defaults).every((binding) => binding.code !== "Space"), "Space stays play and pause");
+  const deckA = actions.filter((action) => action.deck === 0).map((action) => action.name);
+  const deckB = actions.filter((action) => action.deck === 1).map((action) => action.name);
+  assert.deepEqual(deckA, deckB);
+  assert.deepEqual([...new Set(actions.map((action) => action.group))], ["Deck A", "Mixer", "Deck B"]);
+  assert.deepEqual(defaults["0.play"], { code: "KeyD", shift: false });
+  assert.deepEqual(defaults["1.setCue"], { code: "Semicolon", shift: true });
+  assert.deepEqual(defaults.help, { code: "Slash", shift: true });
+  for (const action of actions) {
+    if (action.glide) assert.ok(Object.hasOwn(DJ_KEY_GLIDES, action.glide.control), action.id);
+  }
+});
+
+test("continuous keys step per press and glide while held", () => {
+  assert.equal(keyStep("volume", 50, 1), 55);
+  assert.equal(keyStep("volume", 98, 1), 100);
+  assert.equal(keyStep("volume", 2, -1), 0);
+  assert.equal(keyStep("tempo", 0.37, 1, 8), 0.47);
+  assert.equal(keyStep("tempo", 7.95, 1, 8), 8);
+  assert.equal(keyStep("tempo", -15.95, -1, 16), -16);
+  assert.equal(keyStep("filter", 0, -1), -0.05);
+  assert.equal(keyStep("crossfader", 0.98, 1), 1);
+  assert.equal(glideValue("crossfader", 0, 1, DJ_KEY_GLIDE_DELAY_MS), 0.05);
+  assert.equal(glideValue("crossfader", 0, 1, DJ_KEY_GLIDE_DELAY_MS + 500), 0.55);
+  assert.equal(glideValue("crossfader", 0, -1, 60000), -1);
+  assert.equal(glideValue("volume", 50, -1, DJ_KEY_GLIDE_DELAY_MS + 200), 35);
+  assert.equal(glideValue("tempo", 0, 1, DJ_KEY_GLIDE_DELAY_MS + 1000, 8), 1.1);
+  assert.equal(glideValue("filter", Number.NaN, 1, 0), 0.05);
+});
+
+test("EQ kill keys cut a band and restore its value", () => {
+  assert.equal(eqKillTarget(0, undefined), -26);
+  assert.equal(eqKillTarget(3.5, undefined), -26);
+  assert.equal(eqKillTarget(-26, 3.5), 3.5);
+  assert.equal(eqKillTarget(-26, undefined), 0);
+  assert.equal(eqKillTarget(-26, -26), 0);
+});
+
+test("key labels read as the keyboard prints them", () => {
+  assert.equal(keyLabel({ code: "KeyD", shift: false }), "D");
+  assert.equal(keyLabel({ code: "Semicolon", shift: true }), "Shift + ;");
+  assert.equal(keyLabel({ code: "Digit0", shift: false }), "0");
+  assert.equal(keyLabel({ code: "Space", shift: false }), "Space");
+  assert.equal(keyLabel({ code: "PageUp", shift: true }), "Shift + Page Up");
+  assert.equal(keyLabel({ code: "Numpad4", shift: false }), "Num 4");
+  assert.equal(keyLabel(null), "—");
+  const german = new Map([["Semicolon", "ö"], ["Slash", "-"], ["Space", " "]]);
+  assert.equal(keyLabel({ code: "Semicolon", shift: true }, german), "Shift + Ö");
+  assert.equal(keyLabel({ code: "Slash", shift: false }, german), "-");
+  assert.equal(keyLabel({ code: "Space", shift: false }, german), "Space");
+});
+
+test("key events become shortcut keys only without other modifiers", () => {
+  const event = (code, extra = {}) => ({ code, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, isComposing: false, ...extra });
+  assert.deepEqual(keyFromEvent(event("KeyF")), { code: "KeyF", shift: false });
+  assert.deepEqual(keyFromEvent(event("KeyF", { shiftKey: true })), { code: "KeyF", shift: true });
+  assert.deepEqual(keyFromEvent(event("Space")), { code: "Space", shift: false });
+  for (const extra of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { isComposing: true }]) assert.equal(keyFromEvent(event("KeyF", extra)), null);
+  for (const code of ["ShiftLeft", "ControlRight", "Escape", "Tab", "", "keyf", "Key F", undefined]) assert.equal(keyFromEvent(event(code)), null, String(code));
+  assert.equal(keyFromEvent(null), null);
+  assert.equal(keyMatches({ code: "KeyF", shift: true }, { code: "KeyF", shift: true }), true);
+  assert.equal(keyMatches({ code: "KeyF", shift: true }, { code: "KeyF", shift: false }), false);
+  assert.equal(keyMatches(null, { code: "KeyF", shift: false }), false);
+  assert.equal(keyMatches({ code: "KeyF", shift: false }, null), false);
+});
+
+test("binding a key moves it from the action that held it", () => {
+  const bindings = { a: { code: "KeyD", shift: false }, b: { code: "KeyF", shift: false }, c: { code: "KeyF", shift: true }, d: null };
+  const { bindings: next, moved } = bindKey(bindings, "a", { code: "KeyF", shift: false });
+  assert.deepEqual(moved, ["b"]);
+  assert.deepEqual(next, { a: { code: "KeyF", shift: false }, b: null, c: { code: "KeyF", shift: true }, d: null });
+  assert.deepEqual(bindKey(bindings, "d", { code: "Space", shift: false }).moved, []);
+  assert.deepEqual(bindKey(bindings, "a", { code: "KeyD", shift: false }).moved, []);
+  assert.deepEqual(findConflicts({ a: { code: "KeyF", shift: false }, b: { code: "KeyF", shift: false }, c: null }), [{ key: { code: "KeyF", shift: false }, actions: ["a", "b"] }]);
+});
+
+test("stored key bindings are validated and filled with free defaults", () => {
+  const actions = djKeyActions();
+  const defaults = defaultKeyBindings(actions);
+  assert.deepEqual(parseKeyBindings(null, actions), defaults);
+  assert.deepEqual(parseKeyBindings("not json", actions), defaults);
+  assert.deepEqual(parseKeyBindings(JSON.stringify({ version: 2, keys: { "0.play": null } }), actions), defaults);
+  assert.deepEqual(parseKeyBindings(serializeKeyBindings(defaults), actions), defaults);
+  assert.deepEqual(parseKeyBindings("x".repeat(20000), actions), defaults);
+
+  // Stored keys win; malformed keys and a second use of a key fall back to the free default.
+  const stored = serializeKeyBindings({
+    "0.play": { code: "Space", shift: false },
+    "0.cue": null,
+    "0.sync": { code: "KeyF", shift: false },
+    "0.tempoUp": { code: "Escape", shift: false },
+    "0.tempoDown": { code: "KeyQ", shift: "yes" },
+    "1.play": { code: "Space", shift: false },
+    unknown: { code: "KeyU", shift: false },
+  });
+  const parsed = parseKeyBindings(stored, actions);
+  assert.equal(Object.keys(parsed).length, actions.length);
+  assert.deepEqual(parsed["0.play"], { code: "Space", shift: false });
+  assert.equal(parsed["0.cue"], null);
+  assert.deepEqual(parsed["0.sync"], { code: "KeyF", shift: false });
+  assert.deepEqual(parsed["0.tempoUp"], defaults["0.tempoUp"]);
+  assert.deepEqual(parsed["0.tempoDown"], defaults["0.tempoDown"]);
+  assert.deepEqual(parsed["1.play"], defaults["1.play"]);
+  assert.equal(Object.hasOwn(parsed, "unknown"), false);
+  assert.deepEqual(findConflicts(parsed), []);
+});
+
+test("shortcuts pause in fields that take typed text", () => {
+  assert.equal(typingTarget(null), false);
+  assert.equal(typingTarget({ tagName: "BUTTON" }), false);
+  assert.equal(typingTarget({ tagName: "DIV", isContentEditable: true }), true);
+  assert.equal(typingTarget({ tagName: "TEXTAREA" }), true);
+  assert.equal(typingTarget({ tagName: "SELECT" }), true);
+  for (const type of ["text", "search", "number", "email", "password", "url", "", undefined]) assert.equal(typingTarget({ tagName: "INPUT", type }), true, String(type));
+  for (const type of ["range", "checkbox", "radio", "button"]) assert.equal(typingTarget({ tagName: "INPUT", type }), false, type);
+});
+
+test("spectrum bytes map to dB and bar heights", () => {
+  assert.equal(levelDb(0), -72);
+  assert.equal(levelDb(255), 0);
+  assert.ok(Math.abs(levelDb(170) + 24) < 1e-9);
+  assert.equal(levelHeight(0), 0);
+  assert.equal(levelHeight(63), 0);
+  assert.equal(levelHeight(255), 1);
+  assert.ok(levelHeight(170) > 0.5 && levelHeight(170) < 0.6);
+});
+
+test("the waveform window and its pixel mapping centre the playhead", () => {
+  assert.deepEqual(waveWindow(60000, 6), { from: 5400, to: 6600 });
+  assert.deepEqual(waveWindow(1005, 3), { from: -200, to: 401 });
+  assert.equal(timeX(60000, 60000, 6, 1200), 600);
+  assert.equal(timeX(54000, 60000, 6, 1200), 0);
+  assert.equal(timeX(66000, 60000, 6, 1200), 1200);
+  assert.equal(timeX(63000, 60000, 3, 600), 600);
+  for (const x of [0, 137, 600, 1200]) assert.ok(Math.abs(timeX(xTime(x, 42000, 12, 1200), 42000, 12, 1200) - x) < 1e-9);
+});
+
+test("rangesToFetch requests the uncached columns below the computed count", () => {
+  assert.deepEqual(rangesToFetch([], { from: -100, to: 500 }, null), [{ from: 0, to: 500 }]);
+  assert.deepEqual(rangesToFetch([{ from: 100, to: 200 }, { from: 0, to: 50 }], { from: 0, to: 300 }, null), [{ from: 50, to: 100 }, { from: 200, to: 300 }]);
+  assert.deepEqual(rangesToFetch([{ from: 0, to: 300 }], { from: 100, to: 200 }, null), []);
+  assert.deepEqual(rangesToFetch([{ from: 0, to: 100 }], { from: 0, to: 1000 }, 400), [{ from: 100, to: 400 }]);
+  assert.deepEqual(rangesToFetch([], { from: 500, to: 1000 }, 400), []);
+  assert.deepEqual(rangesToFetch([], { from: 0, to: 2 * SPECTRUM_MAX_COLUMNS + 10 }, null), [
+    { from: 0, to: SPECTRUM_MAX_COLUMNS }, { from: SPECTRUM_MAX_COLUMNS, to: 2 * SPECTRUM_MAX_COLUMNS }, { from: 2 * SPECTRUM_MAX_COLUMNS, to: 2 * SPECTRUM_MAX_COLUMNS + 10 },
+  ]);
+  assert.deepEqual(rangesToFetch([{ from: 10, to: 20 }], { from: 0, to: 30 }, null, 5), [{ from: 0, to: 5 }, { from: 5, to: 10 }, { from: 20, to: 25 }, { from: 25, to: 30 }]);
+});
+
+test("cached spectrum ranges stay sorted, disjoint and bounded", () => {
+  let ranges = insertRange([], { from: 100, to: 200 });
+  ranges = insertRange(ranges, { from: 0, to: 50 });
+  ranges = insertRange(ranges, { from: 300, to: 400 });
+  assert.deepEqual(ranges.map((range) => range.from), [0, 100, 300]);
+  assert.equal(findRange(ranges, 0), 0);
+  assert.equal(findRange(ranges, 49), 0);
+  assert.equal(findRange(ranges, 50), -1);
+  assert.equal(findRange(ranges, 199), 1);
+  assert.equal(findRange(ranges, 350), 2);
+  assert.equal(findRange(ranges, 400), -1);
+  assert.equal(findRange([], 5), -1);
+  assert.deepEqual(insertRange(ranges, { from: 150, to: 320 }).map((range) => [range.from, range.to]), [[0, 50], [150, 320]]);
+
+  const many = [{ from: 0, to: 1000 }, { from: 1000, to: 2000 }, { from: 5000, to: 6000 }, { from: 20000, to: 21000 }];
+  assert.deepEqual(pruneRanges(many, 1500, 6000, 30000).map((range) => range.from), [0, 1000, 5000]);
+  assert.deepEqual(pruneRanges(many, 1500, 6000, 2000).map((range) => range.from), [0, 1000]);
+  assert.deepEqual(pruneRanges(many, 1500, 6000, 10).map((range) => range.from), [1000]);
+  assert.deepEqual(pruneRanges(many, 50000, 6000, 30000), []);
+});
+
+test("theme colours parse and spread over a heat map", () => {
+  assert.deepEqual(parseColour("#126c50"), [18, 108, 80]);
+  assert.deepEqual(parseColour(" #FFF "), [255, 255, 255]);
+  assert.deepEqual(parseColour("rgb(1, 2, 3)"), [1, 2, 3]);
+  assert.deepEqual(parseColour("rgba(10 20 30 / 50%)"), [10, 20, 30]);
+  assert.equal(parseColour("teal"), null);
+  assert.equal(parseColour(""), null);
+  const stops = [[0, 0, 0], [100, 0, 0], [100, 200, 0]];
+  assert.deepEqual(heatColour(0, stops), [0, 0, 0]);
+  assert.deepEqual(heatColour(255, stops), [100, 200, 0]);
+  assert.deepEqual(heatColour(127.5, stops), [100, 0, 0]);
+  assert.deepEqual(heatColour(300, stops), [100, 200, 0]);
+  assert.deepEqual(heatColour(51, [[0, 0, 0], [255, 255, 255]]), [51, 51, 51]);
+});
+
+test("gridTicks marks bars and thins out long spans", () => {
+  assert.deepEqual(gridTicks(null, 0, 1000, 10), []);
+  assert.deepEqual(gridTicks({ bpm: 0, first_beat_ms: 0 }, 0, 1000, 10), []);
+  const ticks = gridTicks({ bpm: 120, first_beat_ms: 250 }, 0, 2500, 100);
+  assert.deepEqual(ticks.map((tick) => tick.ms), [250, 750, 1250, 1750, 2250]);
+  assert.deepEqual(ticks.map((tick) => tick.bar), [true, false, false, false, true]);
+  assert.deepEqual(gridTicks({ bpm: 120, first_beat_ms: 250 }, -300, 0, 100).map((tick) => [tick.ms, tick.bar]), [[-250, false]]);
+  const thinned = gridTicks({ bpm: 120, first_beat_ms: 0 }, 0, 600000, 200);
+  assert.ok(thinned.length <= 200);
+  assert.equal(thinned[1].ms - thinned[0].ms, 8000);
+  assert.ok(thinned.every((tick) => tick.bar));
 });

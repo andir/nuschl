@@ -239,7 +239,9 @@ class Midi {
     if (id === "autoLoad") return dj.autoLoad(player, !state.auto_load);
     const deck = Number(id[0]);
     const data = state.decks[deck];
-    switch (id.slice(2)) {
+    const name = id.slice(2);
+    if (name.startsWith("beatLoop.")) return data.entry ? dj.beatLoop(player, deck, Number(name.slice(9))) : null;
+    switch (name) {
       case "play": return data.entry ? dj.play(player, deck, !data.playing) : null;
       case "cue": return data.entry ? dj.jumpToCue(player, deck) : null;
       case "setCue": return data.entry ? dj.setCue(player, deck) : null;
@@ -247,6 +249,14 @@ class Midi {
       case "eject": return data.entry ? dj.eject(player, deck) : null;
       case "range": return dj.tempoRange(player, deck, data.tempo_range === 8 ? 16 : 8);
       case "sync": return data.bpm ? dj.sync(player, deck) : null;
+      case "loopIn": return data.entry ? dj.loopIn(player, deck) : null;
+      case "loopOut": return data.entry ? dj.loopOut(player, deck) : null;
+      case "loopToggle": return data.entry ? dj.loopToggle(player, deck) : null;
+      case "loopHalve": return data.entry ? dj.loopResize(player, deck, 0.5) : null;
+      case "loopDouble": return data.entry ? dj.loopResize(player, deck, 2) : null;
+      case "loopBack": return data.entry ? dj.loopMove(player, deck, "loop", -1) : null;
+      case "loopForward": return data.entry ? dj.loopMove(player, deck, "loop", 1) : null;
+      case "quantize": return dj.quantize(player, deck, !data.quantize);
       default: return null;
     }
   }

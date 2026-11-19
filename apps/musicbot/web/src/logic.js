@@ -700,6 +700,15 @@ export function paced(send, ms, now = () => Date.now()) {
   return call;
 }
 
+/** Beat loop lengths in beats, as the DJ controls offer them. */
+export const DJ_BEAT_LOOPS = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
+
+/** A beat count as a label: "1/4 beat", "1 beat", "8 beats". */
+export function beatsText(beats) {
+  const text = beats === 0.25 ? "1/4" : beats === 0.5 ? "1/2" : String(beats);
+  return `${text} ${beats > 1 ? "beats" : "beat"}`;
+}
+
 // Web MIDI. A mapping binds DJ controls to the controls of one MIDI device.
 
 /** Every DJ control MIDI can drive: `id`, `label`, `kind` ("range" or "button") and, for ranges, `center`. */
@@ -710,7 +719,7 @@ export function djControls() {
       { id: `${deck}.play`, label: `Play or pause deck ${letter}`, kind: "button" },
       { id: `${deck}.cue`, label: `Go to the cue point of deck ${letter}`, kind: "button" },
       { id: `${deck}.setCue`, label: `Set the cue point of deck ${letter}`, kind: "button" },
-      { id: `${deck}.loadNext`, label: `Load the queue's next song onto deck ${letter}`, kind: "button" },
+      { id: `${deck}.loadNext`, label: `Load deck ${letter}'s next song`, kind: "button" },
       { id: `${deck}.eject`, label: `Eject deck ${letter}`, kind: "button" },
       { id: `${deck}.eq.high`, label: `High EQ of deck ${letter}`, kind: "range", center: true },
       { id: `${deck}.eq.mid`, label: `Mid EQ of deck ${letter}`, kind: "range", center: true },
@@ -720,6 +729,15 @@ export function djControls() {
       { id: `${deck}.tempo`, label: `Tempo of deck ${letter}`, kind: "range", center: true },
       { id: `${deck}.range`, label: `Tempo range of deck ${letter}`, kind: "button" },
       { id: `${deck}.sync`, label: `Sync deck ${letter}`, kind: "button" },
+      { id: `${deck}.loopIn`, label: `Loop in on deck ${letter}`, kind: "button" },
+      { id: `${deck}.loopOut`, label: `Loop out on deck ${letter}`, kind: "button" },
+      { id: `${deck}.loopToggle`, label: `Loop on or off on deck ${letter}`, kind: "button" },
+      ...DJ_BEAT_LOOPS.map((beats) => ({ id: `${deck}.beatLoop.${beats}`, label: `${beatsText(beats)} loop on deck ${letter}`, kind: "button" })),
+      { id: `${deck}.loopHalve`, label: `Halve the loop of deck ${letter}`, kind: "button" },
+      { id: `${deck}.loopDouble`, label: `Double the loop of deck ${letter}`, kind: "button" },
+      { id: `${deck}.loopBack`, label: `Move the loop of deck ${letter} back`, kind: "button" },
+      { id: `${deck}.loopForward`, label: `Move the loop of deck ${letter} forward`, kind: "button" },
+      { id: `${deck}.quantize`, label: `Quantize on deck ${letter}`, kind: "button" },
     );
   }
   controls.push(
@@ -853,4 +871,384 @@ export function bindingText(binding) {
   if (!binding) return "—";
   const what = binding.type === "note" ? `Note ${binding.number}` : `CC ${binding.number}`;
   return `${what}, channel ${binding.channel + 1}${binding.mode === "fine" ? ", 14-bit" : ""}`;
+}
+
+// Keyboard shortcuts for the DJ view. A shortcut is a physical key
+// (`KeyboardEvent.code`, the same on every layout) with or without Shift.
+
+/** Escape cancels and closes, Tab moves the focus; shortcuts leave both to the page. */
+const RESERVED_KEYS = new Set(["Escape", "Tab"]);
+const MODIFIER_KEYS = new Set([
+  "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight",
+  "OSLeft", "OSRight", "CapsLock", "Fn", "FnLock", "NumLock", "ScrollLock", "ContextMenu",
+]);
+const KEY_CODE = /^[A-Z][A-Za-z0-9]{0,31}$/;
+
+/** True for a `KeyboardEvent.code` a shortcut can use. */
+function bindableCode(code) {
+  return typeof code === "string" && KEY_CODE.test(code) && !RESERVED_KEYS.has(code) && !MODIFIER_KEYS.has(code);
+}
+
+/**
+ * The continuous controls keys move: `step` per press and `rate` per second
+ * while the key stays down, rounded to `digits` decimals, within `min`…`max`
+ * (tempo: ± the deck's tempo range).
+ */
+export const DJ_KEY_GLIDES = {
+  volume: { step: 5, rate: 50, min: 0, max: 100, digits: 0 },
+  tempo: { step: 0.1, rate: 1, min: null, max: null, digits: 2 },
+  filter: { step: 0.05, rate: 0.5, min: -1, max: 1, digits: 2 },
+  crossfader: { step: 0.05, rate: 1, min: -1, max: 1, digits: 2 },
+};
+/** A key held this long starts gliding; a quick press moves one step. */
+export const DJ_KEY_GLIDE_DELAY_MS = 250;
+
+/**
+ * The value of continuous `control` after its key has been down for `heldMs`
+ * from `start`: one step at once, then `rate` per second after the glide delay.
+ * `direction` is −1 or 1; `range` bounds the tempo in percent.
+ */
+export function glideValue(control, start, direction, heldMs, range = 8) {
+  const glide = DJ_KEY_GLIDES[control];
+  const min = control === "tempo" ? -range : glide.min;
+  const max = control === "tempo" ? range : glide.max;
+  const travel = glide.step + glide.rate * Math.max(0, (Number(heldMs) || 0) - DJ_KEY_GLIDE_DELAY_MS) / 1000;
+  const scale = 10 ** glide.digits;
+  return clamp(Math.round(((Number(start) || 0) + direction * travel) * scale) / scale, min, max);
+}
+
+/** The value of continuous `control` after one key press from `value`. */
+export function keyStep(control, value, direction, range = 8) {
+  return glideValue(control, value, direction, 0, range);
+}
+
+/** The EQ value a kill key sets: the kill at −26 dB, or back to `previous` (0 when unknown) from a kill. */
+export function eqKillTarget(current, previous) {
+  if (current > DJ_EQ_MIN) return DJ_EQ_MIN;
+  return Number.isFinite(previous) && previous > DJ_EQ_MIN ? previous : 0;
+}
+
+/**
+ * Every DJ action a key can trigger, in the order the shortcuts panel lists
+ * them: `id`, `label`, `group` ("Deck A", "Mixer", "Deck B"), `deck` (0, 1
+ * or null), `name`, the default `key` and, for continuous controls, `glide`
+ * (`{ control, direction }`); EQ kills carry `band` and beat loops `beats`.
+ */
+export function djKeyActions() {
+  const layouts = [
+    [0, {
+      play: "KeyD", cue: "KeyF", seekBack: "KeyA", seekForward: "KeyQ", tempoDown: "KeyS", tempoUp: "KeyW",
+      volumeDown: "KeyC", volumeUp: "KeyE", filterLeft: "KeyZ", filterRight: "KeyX", sync: "KeyR", loadNext: "KeyT",
+      headphones: "KeyV", low: "Digit1", mid: "Digit2", high: "Digit3", loop4: "Digit4", loop8: "Digit5",
+    }],
+    [1, {
+      play: "KeyL", cue: "Semicolon", seekBack: "KeyJ", seekForward: "KeyU", tempoDown: "KeyK", tempoUp: "KeyI",
+      volumeDown: "Period", volumeUp: "KeyO", filterLeft: "KeyM", filterRight: "Comma", sync: "KeyP", loadNext: "KeyY",
+      headphones: "Slash", low: "Digit8", mid: "Digit9", high: "Digit0", loop4: "Minus", loop8: "Equal",
+    }],
+  ];
+  const actions = [];
+  for (const [deck, k] of layouts) {
+    const group = deck === 0 ? "Deck A" : "Deck B";
+    const add = (name, label, code, shift, extra = {}) => actions.push({ id: `${deck}.${name}`, label, group, deck, name, key: { code, shift }, ...extra });
+    add("play", "Play or pause", k.play, false);
+    add("cue", "Go to the cue point", k.cue, false);
+    add("setCue", "Set the cue point", k.cue, true);
+    add("seekBack", "Seek back 4 s", k.seekBack, false);
+    add("seekForward", "Seek forward 4 s", k.seekForward, false);
+    add("tempoDown", "Tempo down", k.tempoDown, false, { glide: { control: "tempo", direction: -1 } });
+    add("tempoUp", "Tempo up", k.tempoUp, false, { glide: { control: "tempo", direction: 1 } });
+    add("volumeDown", "Volume down", k.volumeDown, false, { glide: { control: "volume", direction: -1 } });
+    add("volumeUp", "Volume up", k.volumeUp, false, { glide: { control: "volume", direction: 1 } });
+    add("filterLeft", "Filter towards low-pass", k.filterLeft, false, { glide: { control: "filter", direction: -1 } });
+    add("filterRight", "Filter towards high-pass", k.filterRight, false, { glide: { control: "filter", direction: 1 } });
+    add("kill.low", "Cut or restore the low EQ", k.low, false, { band: "low" });
+    add("kill.mid", "Cut or restore the mid EQ", k.mid, false, { band: "mid" });
+    add("kill.high", "Cut or restore the high EQ", k.high, false, { band: "high" });
+    add("sync", "Sync to the other deck", k.sync, false);
+    add("loadNext", "Load the deck's next song", k.loadNext, false);
+    add("headphones", "Headphone cue on or off", k.headphones, false);
+    add("loopIn", "Loop in", k.filterLeft, true);
+    add("loopOut", "Loop out", k.filterRight, true);
+    add("loopToggle", "Loop on or off", k.play, true);
+    add("beatLoop.4", "4 beat loop", k.loop4, false, { beats: 4 });
+    add("beatLoop.8", "8 beat loop", k.loop8, false, { beats: 8 });
+    add("loopHalve", "Halve the loop", k.tempoDown, true);
+    add("loopDouble", "Double the loop", k.tempoUp, true);
+    add("loopBack", "Move the loop back", k.seekBack, true);
+    add("loopForward", "Move the loop forward", k.seekForward, true);
+    if (deck === 0) {
+      const mixer = (id, label, code, shift, extra = {}) => actions.push({ id, label, group: "Mixer", deck: null, name: id, key: { code, shift }, ...extra });
+      mixer("crossfaderLeft", "Crossfader towards A", "KeyG", false, { glide: { control: "crossfader", direction: -1 } });
+      mixer("crossfaderRight", "Crossfader towards B", "KeyH", false, { glide: { control: "crossfader", direction: 1 } });
+      mixer("crossfaderA", "Crossfader to deck A", "KeyG", true);
+      mixer("crossfaderB", "Crossfader to deck B", "KeyH", true);
+      mixer("transition", "Fade to the other deck", "KeyB", false);
+      mixer("autoLoad", "Auto load on or off", "KeyN", false);
+      mixer("help", "Show the keyboard shortcuts", "Slash", true);
+    }
+  }
+  return actions;
+}
+
+/** The default bindings: `{ actionId: { code, shift } }`. */
+export function defaultKeyBindings(actions = djKeyActions()) {
+  return Object.fromEntries(actions.map((action) => [action.id, { ...action.key }]));
+}
+
+const KEY_NAMES = {
+  Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backslash: "\\", BracketLeft: "[", BracketRight: "]",
+  Minus: "-", Equal: "=", Backquote: "`", IntlBackslash: "<", ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓",
+};
+
+/**
+ * How a binding reads, such as "Shift + ;". `layout` (a map from code to the
+ * character, as `navigator.keyboard.getLayoutMap()` gives) names keys as this
+ * keyboard prints them; the US layout names the rest.
+ */
+export function keyLabel(binding, layout = null) {
+  if (!binding) return "—";
+  const { code } = binding;
+  const printed = typeof layout?.get === "function" ? layout.get(code) : undefined;
+  let name;
+  if (typeof printed === "string" && printed.trim() !== "" && [...printed].length === 1) name = printed.toLocaleUpperCase();
+  else if (/^Key[A-Z]$/.test(code)) name = code.slice(3);
+  else if (/^Digit\d$/.test(code)) name = code.slice(5);
+  else if (/^Numpad\d$/.test(code)) name = `Num ${code.slice(6)}`;
+  else name = KEY_NAMES[code] ?? code.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return binding.shift ? `Shift + ${name}` : name;
+}
+
+/** The shortcut key of a keyboard event as `{ code, shift }`, or null for presses with Ctrl, Alt or Meta, modifiers alone, Escape, Tab and composition. */
+export function keyFromEvent(event) {
+  if (!event || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || !bindableCode(event.code)) return null;
+  return { code: event.code, shift: event.shiftKey === true };
+}
+
+/** True when `key` (from keyFromEvent) is `binding`. */
+export function keyMatches(binding, key) {
+  return !!binding && !!key && binding.code === key.code && binding.shift === key.shift;
+}
+
+const keyId = (binding) => `${binding.shift ? "Shift+" : ""}${binding.code}`;
+
+/** Keys bound to more than one action: `[{ key, actions: [actionId, …] }]`. */
+export function findConflicts(bindings) {
+  const byKey = new Map();
+  for (const [id, binding] of Object.entries(bindings)) {
+    if (!binding) continue;
+    const found = byKey.get(keyId(binding));
+    if (found) found.actions.push(id);
+    else byKey.set(keyId(binding), { key: { code: binding.code, shift: binding.shift }, actions: [id] });
+  }
+  return [...byKey.values()].filter((entry) => entry.actions.length > 1);
+}
+
+/** `bindings` with `key` on action `id`; `moved` lists the actions that held `key` before and are unbound now. */
+export function bindKey(bindings, id, key) {
+  const next = {};
+  const moved = [];
+  for (const [other, binding] of Object.entries(bindings)) {
+    if (other !== id && keyMatches(binding, key)) {
+      next[other] = null;
+      moved.push(other);
+    } else {
+      next[other] = binding;
+    }
+  }
+  next[id] = { code: key.code, shift: key.shift };
+  return { bindings: next, moved };
+}
+
+const validKey = (value) => value !== null && typeof value === "object" && bindableCode(value.code) && typeof value.shift === "boolean";
+
+/**
+ * Stored bindings (JSON) read back as `{ actionId: { code, shift } | null }`
+ * for every action: stored keys first, then each remaining action's default
+ * while its key is free. Unknown actions, malformed keys and repeats of a key
+ * drop out.
+ */
+export function parseKeyBindings(text, actions = djKeyActions()) {
+  let stored = null;
+  try {
+    stored = typeof text === "string" && text.length <= 16384 ? JSON.parse(text) : null;
+  } catch {
+    stored = null;
+  }
+  const keys = stored?.version === 1 && stored.keys !== null && typeof stored.keys === "object" && !Array.isArray(stored.keys) ? stored.keys : {};
+  const bindings = {};
+  const used = new Set();
+  for (const action of actions) {
+    if (!Object.hasOwn(keys, action.id)) continue;
+    const value = keys[action.id];
+    if (value === null) bindings[action.id] = null;
+    else if (validKey(value) && !used.has(keyId(value))) {
+      bindings[action.id] = { code: value.code, shift: value.shift };
+      used.add(keyId(value));
+    }
+  }
+  for (const action of actions) {
+    if (Object.hasOwn(bindings, action.id)) continue;
+    const free = !used.has(keyId(action.key));
+    bindings[action.id] = free ? { ...action.key } : null;
+    if (free) used.add(keyId(action.key));
+  }
+  return bindings;
+}
+
+/** The JSON bindings are stored as. */
+export function serializeKeyBindings(bindings) {
+  return JSON.stringify({ version: 1, keys: bindings });
+}
+
+const KEY_INPUT_TYPES = new Set(["range", "checkbox", "radio", "button", "submit", "reset", "color", "file", "image"]);
+
+/** True when a keyboard event target takes typed text: text-like inputs, textareas, selects and editable content. */
+export function typingTarget(target) {
+  if (!target || typeof target !== "object") return false;
+  if (target.isContentEditable === true) return true;
+  const tag = String(target.tagName ?? "").toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  return tag === "INPUT" && !KEY_INPUT_TYPES.has(String(target.type || "text").toLowerCase());
+}
+
+// DJ waveforms: spectrum columns from `api/spectrum`. Column n covers song
+// time [n * 10 ms, (n + 1) * 10 ms); a byte is a level from −72 dBFS (0) to
+// 0 dBFS (255), linear in dB.
+
+export const SPECTRUM_COLUMN_MS = 10;
+/** Most columns one `api/spectrum` request returns. */
+export const SPECTRUM_MAX_COLUMNS = 2000;
+/** Half-widths of the waveform window in seconds, as the zoom buttons offer them. */
+export const DJ_WAVE_ZOOMS = [3, 6, 12];
+
+/** Level in dB of a spectrum byte. */
+export function levelDb(byte) {
+  return (byte * 72) / 255 - 72;
+}
+
+/** Bar height 0..1 of a spectrum byte: −54 dBFS and below draw nothing, 0 dBFS the full height. */
+export function levelHeight(byte) {
+  return clamp((levelDb(byte) + 54) / 54, 0, 1);
+}
+
+/** Visible columns [from, to) of a window ±`zoomS` seconds around `positionMs`; `from` may be negative. */
+export function waveWindow(positionMs, zoomS) {
+  const centre = positionMs / SPECTRUM_COLUMN_MS;
+  const half = (zoomS * 1000) / SPECTRUM_COLUMN_MS;
+  return { from: Math.floor(centre - half), to: Math.ceil(centre + half) };
+}
+
+/** Horizontal position of song time `ms` on a canvas `width` wide that centres `positionMs` and spans ±`zoomS` seconds. */
+export function timeX(ms, positionMs, zoomS, width) {
+  return width / 2 + ((ms - positionMs) / (zoomS * 2000)) * width;
+}
+
+/** Song time at horizontal position `x`; the inverse of timeX. */
+export function xTime(x, positionMs, zoomS, width) {
+  return positionMs + ((x - width / 2) / width) * zoomS * 2000;
+}
+
+/**
+ * Column ranges to request for the `wanted` range: the parts outside every
+ * range in `cached` (sorted or not, each `{ from, to }`), below `computed`
+ * (columns the bot has so far; null when unknown), from column 0, split into
+ * requests of at most `maxCount` columns.
+ */
+export function rangesToFetch(cached, wanted, computed, maxCount = SPECTRUM_MAX_COLUMNS) {
+  const end = computed == null ? wanted.to : Math.min(wanted.to, computed);
+  const sorted = [...cached].sort((a, b) => a.from - b.from);
+  const out = [];
+  let at = Math.max(0, wanted.from);
+  const take = (to) => {
+    for (; at < to; at = Math.min(to, at + maxCount)) out.push({ from: at, to: Math.min(to, at + maxCount) });
+  };
+  for (const range of sorted) {
+    if (at >= end) break;
+    if (range.to <= at) continue;
+    if (range.from > at) take(Math.min(range.from, end));
+    at = Math.max(at, range.to);
+  }
+  take(end);
+  return out;
+}
+
+/** Index of the range in `ranges` (sorted by `from`, disjoint) that holds `column`, or -1. */
+export function findRange(ranges, column) {
+  let low = 0;
+  let high = ranges.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (column < ranges[mid].from) high = mid - 1;
+    else if (column >= ranges[mid].to) low = mid + 1;
+    else return mid;
+  }
+  return -1;
+}
+
+/** Copy of `ranges` (sorted by `from`, disjoint) with `range` added in order, replacing the ranges it overlaps. */
+export function insertRange(ranges, range) {
+  const out = ranges.filter((item) => item.to <= range.from || item.from >= range.to);
+  const index = out.findIndex((item) => item.from > range.from);
+  out.splice(index < 0 ? out.length : index, 0, range);
+  return out;
+}
+
+/** Distance in columns from `column` to the range `{ from, to }`; 0 inside it. */
+const rangeDistance = (range, column) => (column < range.from ? range.from - column : column >= range.to ? column - range.to + 1 : 0);
+
+/**
+ * Copy of `ranges` holding the ones within `keep` columns of `column`, and at
+ * most `cap` columns in all: the nearest ranges stay.
+ */
+export function pruneRanges(ranges, column, keep, cap) {
+  const near = ranges.filter((range) => rangeDistance(range, column) <= keep);
+  const byDistance = [...near].sort((a, b) => rangeDistance(a, column) - rangeDistance(b, column));
+  const kept = new Set();
+  let total = 0;
+  for (const range of byDistance) {
+    total += range.to - range.from;
+    if (total > cap && kept.size) break;
+    kept.add(range);
+  }
+  return near.filter((range) => kept.has(range));
+}
+
+/** `[r, g, b]` of a CSS colour in `#rgb`, `#rrggbb`, `rgb()` or `rgba()` form, or null. */
+export function parseColour(text) {
+  const value = String(text ?? "").trim().toLowerCase();
+  let match = /^#([0-9a-f]{3})$/.exec(value);
+  if (match) return [...match[1]].map((digit) => parseInt(digit + digit, 16));
+  match = /^#([0-9a-f]{6})$/.exec(value);
+  if (match) return [0, 2, 4].map((at) => parseInt(match[1].slice(at, at + 2), 16));
+  match = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(value);
+  if (match) return match.slice(1, 4).map((part) => clamp(Math.round(Number(part)), 0, 255));
+  return null;
+}
+
+/** Heat-map colour `[r, g, b]` of a spectrum byte between evenly spread colour `stops` (quiet first). */
+export function heatColour(byte, stops) {
+  const at = (clamp(byte, 0, 255) / 255) * (stops.length - 1);
+  const index = Math.min(Math.floor(at), stops.length - 2);
+  const share = at - index;
+  const [a, b] = [stops[index], stops[index + 1] ?? stops[index]];
+  return a.map((channel, i) => Math.round(channel + (b[i] - channel) * share));
+}
+
+/**
+ * Beat-grid ticks between `fromMs` and `toMs` for `grid` (`{ bpm, first_beat_ms }`
+ * or null), at most `maxTicks`: every beat, or every 4th, 16th … beat when
+ * they would be more. `bar` marks every 4th beat from the first beat.
+ */
+export function gridTicks(grid, fromMs, toMs, maxTicks) {
+  if (!grid || !(grid.bpm > 0) || !Number.isFinite(grid.first_beat_ms) || !(toMs > fromMs)) return [];
+  const beat = 60000 / grid.bpm;
+  let step = 1;
+  while ((toMs - fromMs) / (beat * step) > maxTicks) step *= 4;
+  const span = beat * step;
+  const ticks = [];
+  for (let k = Math.ceil((fromMs - grid.first_beat_ms) / span); grid.first_beat_ms + k * span <= toMs; k++) {
+    ticks.push({ ms: grid.first_beat_ms + k * span, bar: step > 1 || ((k % 4) + 4) % 4 === 0 });
+  }
+  return ticks;
 }
