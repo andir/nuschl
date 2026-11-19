@@ -15,7 +15,7 @@
   const mix = $derived(player?.dj ?? null);
   let switching = $state(false);
 
-  // In learn mode a press on a control picks it for MIDI learn instead of using it.
+  // In learn mode a press on a control picks it for MIDI learn and leaves its value as it is.
   function pick(event) {
     if (!midi.learnMode) return;
     const control = event.target.closest?.("[data-control]");

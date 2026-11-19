@@ -568,7 +568,8 @@ channel or a browser listener and the deck sounds in it at −20 dB or more
 announces it as now playing. When the song leaves the deck (end, eject, a new
 song, a fade with auto load, leaving DJ mode) the play enters the history like a
 queue play: completed at the end, skipped otherwise, failed on errors. Scrobbling
-uses the queue's threshold on heard time. Headphone cue audio never counts.
+uses the queue's threshold on heard time. Heard time counts the room's mix only;
+headphone cue audio stays out of it.
 
 **MIDI controllers.** In browsers with Web MIDI (Chromium-based, over HTTPS or on
 localhost), **Use a MIDI controller** lists the inputs. **Learn** beside a
@@ -578,9 +579,9 @@ button moved; Escape cancels. Faders and knobs take control changes: absolute,
 encoders (1–63 up, 65–127 down); EQ, filter, tempo and crossfader knobs rest at
 their middle. Buttons take note-on or a control change of 64 or more. The mapping
 is kept in localStorage per device name and can be cleared. MIDI drives the queue
-selected on the page; headphone cue needs a click. The bot sends no
-Permissions-Policy header, so Web MIDI's default allowlist (`self`) admits the
-page's own origin. No controller presets ship.
+selected on the page; headphone cue needs a click. Web MIDI's default allowlist
+(`self`) admits the page's own origin, and the bot sends no Permissions-Policy
+header that narrows it. Every controller is set up through Learn.
 
 ## Lyrics
 

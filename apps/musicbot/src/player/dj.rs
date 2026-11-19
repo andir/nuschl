@@ -2,7 +2,7 @@
 //! DJ mode: two decks, each fed by its own decode child, mixed live into the
 //! player's outputs (Mumble and browser listeners). Controls set targets in
 //! the state; the engine moves towards them frame by frame (`dsp.rs`), so
-//! changes that arrive in bursts over the network glide instead of clicking.
+//! changes that arrive in bursts over the network glide smoothly.
 use super::{
     CHANNELS, Decoding, Entry, FRAME, HistoryOutcome, MAX_QUEUE, Output, Player, Playing, State,
     TICK, UNDERRUN_END, apply_gain, decode,
@@ -264,7 +264,7 @@ impl fmt::Display for DjError {
         formatter.write_str(match self {
             Self::Off => "DJ mode is off for this queue.",
             Self::Empty => "That deck has no song.",
-            Self::NotQueued => "That song is no longer in the queue.",
+            Self::NotQueued => "That song has left the queue.",
             Self::NoBpm => "Sync needs the BPM of both songs.",
             Self::OutOfRange => "The other deck's BPM is beyond this deck's tempo range.",
             Self::NothingToFadeTo => "Load a song into the other deck first.",
