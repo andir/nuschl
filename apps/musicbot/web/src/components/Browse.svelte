@@ -13,6 +13,7 @@
   import Playlists from "./Playlists.svelte";
   import PlaylistTools from "./PlaylistTools.svelte";
   import AddToPlaylist from "./AddToPlaylist.svelte";
+  import DeckQueueAdd from "./DeckQueueAdd.svelte";
   import Genres from "./Genres.svelte";
   import GenreSongs from "./GenreSongs.svelte";
 
@@ -251,6 +252,7 @@
             <div class="detail-actions">
               <button class="btn primary" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace })}><Icon name="add" /> Add to queue</button>
               <button class="btn" disabled={!current || !store.player || !songs.length} onclick={() => store.add(store.selected, { kind: route.view, library: detail.library, id: detail.id, namespace }, 0)}><Icon name="next" /> Play next</button>
+              <DeckQueueAdd button item={{ kind: route.view, library: detail.library, id: detail.id, namespace }} title={detail.name} disabled={!current || !songs.length} />
               {#if route.view === "album"}<AddToPlaylist library={detail.library} album={detail.id} title={detail.name} {namespace} />{/if}
             </div>
           {/if}

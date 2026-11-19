@@ -11,6 +11,7 @@
   import SongRating from "./SongRating.svelte";
   import Icon from "./Icon.svelte";
   import AddToPlaylist from "./AddToPlaylist.svelte";
+  import DeckQueueAdd from "./DeckQueueAdd.svelte";
   import FavoriteHeart from "./FavoriteHeart.svelte";
   import Lyrics from "./Lyrics.svelte";
 
@@ -55,6 +56,7 @@
     <div class="detail-actions">
       <button class="btn primary" disabled={!current || !store.player} onclick={() => store.add(store.selected, item)}><Icon name="add" /> Add to queue</button>
       <button class="btn" disabled={!current || !store.player} onclick={() => store.add(store.selected, item, 0)}><Icon name="next" /> Play next</button>
+      <DeckQueueAdd button {item} title={song.title} disabled={!current} />
       <FavoriteHeart library={song.library} songId={song.id} title={song.title} {namespace} />
       <AddToPlaylist library={song.library} songs={[song.id]} title={song.title} {namespace} />
       {#if sonic && pathFrom !== null}

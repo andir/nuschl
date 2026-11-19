@@ -62,24 +62,55 @@ class Dj {
     return this.send({ player, control: "mode", on });
   }
 
-  /** Loads a library song (`{ library, id, namespace }`) or a queue entry (`{ entry }`) onto `deck`. */
-  load(player, deck, item) {
-    if (item.entry != null) return this.send({ player, control: "load", deck, entry: item.entry });
-    if (!store.browseItemCurrent(item)) {
-      store.toast("The library changed or is reconnecting. Choose the song from the refreshed library.");
-      return Promise.resolve(false);
-    }
-    return this.send({ player, control: "load", deck, library: item.library, id: item.id });
+  /** True when `item` belongs to the library the page shows; a stale item gets a toast asking to choose again. */
+  #current(item) {
+    if (store.browseItemCurrent(item)) return true;
+    store.toast("The library changed or is reconnecting. Choose the item from the refreshed library.");
+    return false;
   }
 
-  /** Loads the queue's next song onto `deck`. */
+  /**
+   * Loads onto `deck` a library item (`{ kind, library, id, namespace }`, kind
+   * "song" by default) or an entry of the main queue or a deck queue
+   * (`{ entry }`). An album or playlist loads its first song and puts the rest
+   * at the front of the deck's queue.
+   */
+  load(player, deck, item) {
+    if (item.entry != null) return this.send({ player, control: "load", deck, entry: item.entry });
+    if (!this.#current(item)) return Promise.resolve(false);
+    return this.send({ player, control: "load", deck, library: item.library, id: item.id, kind: item.kind ?? "song" });
+  }
+
+  /** Loads the first song of the deck's queue onto `deck`, else the main queue's first. */
   loadNext(player, deck) {
-    const entry = store.snapshot?.players[player]?.queue[0];
+    const entry = store.snapshot?.players[player]?.deck_queues?.[deck]?.[0] ?? store.queue(player)[0];
     if (!entry) {
-      store.toast("The queue is empty.");
+      store.toast(`The deck ${deck === 0 ? "A" : "B"} queue and the main queue are empty.`);
       return Promise.resolve(false);
     }
     return this.load(player, deck, { entry: entry.id });
+  }
+
+  /** Adds a library song, album or playlist to the queue of `deck` at `index` (null: at the end). */
+  queueAdd(player, deck, item, index = null) {
+    if (!this.#current(item)) return Promise.resolve(false);
+    return this.send({ player, control: "queue_add", deck, library: item.library, id: item.id, kind: item.kind ?? "song", index });
+  }
+
+  /**
+   * Moves an entry of any queue into the queue of `deck` (0 or 1), or into the
+   * main queue for `deck` null, at `index` counted in that queue without the entry.
+   */
+  queueMove(player, entry, deck, index) {
+    return this.send({ player, control: "queue_move", entry, deck, index });
+  }
+
+  queueRemove(player, entry) {
+    return this.send({ player, control: "queue_remove", entry });
+  }
+
+  queueClear(player, deck) {
+    return this.send({ player, control: "queue_clear", deck });
   }
 
   eject(player, deck) {
@@ -108,6 +139,44 @@ class Dj {
 
   tempoRange(player, deck, range) {
     return this.send({ player, control: "tempo_range", deck, range });
+  }
+
+  loopIn(player, deck) {
+    return this.send({ player, control: "loop_in", deck });
+  }
+
+  loopOut(player, deck) {
+    return this.send({ player, control: "loop_out", deck });
+  }
+
+  /** Leaves the loop, or jumps back into the last loop. */
+  loopToggle(player, deck) {
+    return this.send({ player, control: "loop_toggle", deck });
+  }
+
+  /** A loop of `beats` beats (0.25 to 32) from the playing position. */
+  beatLoop(player, deck, beats) {
+    return this.send({ player, control: "beat_loop", deck, beats });
+  }
+
+  /** `factor` 0.5 halves the loop, 2 doubles it. */
+  loopResize(player, deck, factor) {
+    return this.send({ player, control: "loop_resize", deck, factor });
+  }
+
+  /** Shifts the loop by its own length (`by` "loop") or one beat ("beat") in `direction` -1 or 1. */
+  loopMove(player, deck, by, direction) {
+    return this.send({ player, control: "loop_move", deck, by, direction });
+  }
+
+  /** Sets both loop ends, paced while a handle moves; the bot snaps them to beats with quantise on. */
+  loopSet(player, deck, startMs, endMs) {
+    const value = { start_ms: Math.max(0, Math.round(startMs)), end_ms: Math.max(0, Math.round(endMs)) };
+    this.#continuous(`${player}:${deck}:loop`, value, { player, control: "loop_set", deck, ...value });
+  }
+
+  quantize(player, deck, on) {
+    return this.send({ player, control: "quantize", deck, on });
   }
 
   volume(player, deck, volume) {

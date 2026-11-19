@@ -59,7 +59,7 @@
 
   <label class="auto-load" class:learning={learning === "autoLoad"} data-control="autoLoad">
     <input type="checkbox" checked={mix.auto_load} onchange={(event) => dj.autoLoad(player, event.currentTarget.checked)} />
-    <span>Auto load: after a fade or at the end of a song, the silent deck takes the queue's next song</span>
+    <span>Auto load: after a fade or at the end of a song, the silent deck takes the next song from its deck queue, else from the main queue</span>
   </label>
 
   {#if cueListening.deck !== null}

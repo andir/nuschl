@@ -2,8 +2,8 @@
 <script>
   import { store } from "../store.svelte.js";
   import { dj } from "../dj.svelte.js";
-  import { buildRoute, formatDuration, gapIndex, moveTarget, stepTarget } from "../logic.js";
-  import { carriesEntry, carriesItem, droppedEntry, droppedItem, leftElement, startEntryDrag } from "../dnd.js";
+  import { buildRoute, formatDuration, gapIndex, stepTarget } from "../logic.js";
+  import { carriesEntry, carriesItem, droppedEntry, droppedItem, entryDropIndex, leftElement, startEntryDrag } from "../dnd.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
 
@@ -55,10 +55,13 @@
       store.add(selected, item, target);
     } else if (carriesEntry(event)) {
       const entry = droppedEntry(event);
-      const from = queue.findIndex((item) => item.id === entry);
-      const to = moveTarget(from, target, queue.length);
       event.preventDefault();
-      if (to !== null) store.move(selected, entry, to);
+      if (entry === null) return;
+      const to = entryDropIndex(queue, entry, target);
+      if (to === null) return;
+      // Entries from a deck queue move back into the main queue.
+      if (queue.some((item) => item.id === entry)) store.move(selected, entry, to);
+      else if (djState) dj.queueMove(selected, entry, null, to);
     }
   }
 
@@ -115,7 +118,7 @@
         <a class="similar-link" href={buildRoute({ view: "dj" })}><Icon name="decks" size={16} /> Open the decks</a>
       {:else}<p class="muted">Nothing is playing. Add music from the library.</p>{/if}
     </div>
-    <div class="upcoming-heading"><h2 class="eyebrow">Up next</h2><span class="muted small">Drag to reorder</span></div>
+    <div class="upcoming-heading"><h2 class="eyebrow">Up next</h2><span class="muted small">{djState ? "Drag to reorder or onto a deck" : "Drag to reorder"}</span></div>
     <p class="visually-hidden" id="{id}-help">Use the move handle and Alt plus Up or Down arrow to reorder a track.</p>
     <ol class="rows" class:card={!compact} aria-label="Upcoming tracks">
       {#each queue as entry, i (entry.id)}
@@ -133,7 +136,7 @@
           <div class="row-actions">
             {#if djState}
               {#each ["A", "B"] as letter, deck (letter)}
-                <button class="icon-btn deck-load" aria-label="Load {entry.track.title} onto deck {letter}" title="Load onto deck {letter}" onclick={() => dj.load(selected, deck, { entry: entry.id })}>{letter}</button>
+                <button class="icon-btn deck-add" aria-label="Add {entry.track.title} to deck {letter} queue" title="Add to deck {letter} queue" onclick={() => dj.queueMove(selected, entry.id, deck, player.deck_queues?.[deck]?.length ?? 0)}>{letter}</button>
               {/each}
             {/if}
             <button class="icon-btn" disabled={i === 0} aria-label="Move {entry.track.title} to play next" title="Play next" onclick={() => store.move(selected, entry.id, 0)}><Icon name="next" size={18} /></button>
@@ -158,8 +161,8 @@
   .btn.active { border-color: var(--accent); color: var(--accent); }
   .deck-list { list-style: none; margin: 0 0 0.4rem; padding: 0; display: grid; gap: 0.35rem; }
   .deck-list li { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
-  .deck-load { font-weight: 700; font-size: 0.85rem; }
-  .compact .row-actions:has(.deck-load) { display: grid; grid-template-columns: repeat(2, auto); }
+  .deck-add { font-weight: 700; font-size: 0.85rem; }
+  .compact .row-actions:has(.deck-add) { display: grid; grid-template-columns: repeat(2, auto); }
   .queue-choice select { width: 100%; }
   .queue-meta { font-size: 0.8rem; font-variant-numeric: tabular-nums; }
   .now-playing { margin-top: 1rem; }

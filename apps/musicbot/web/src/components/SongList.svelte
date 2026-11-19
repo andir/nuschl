@@ -1,13 +1,13 @@
 <!-- SPDX-License-Identifier: EUPL-1.2 -->
 <script>
   import { store } from "../store.svelte.js";
-  import { dj } from "../dj.svelte.js";
   import { buildRoute, formatDuration, similarityPercent, sonicPathStart } from "../logic.js";
   import { startItemDrag } from "../dnd.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
   import SongRating from "./SongRating.svelte";
   import AddToPlaylist from "./AddToPlaylist.svelte";
+  import DeckQueueAdd from "./DeckQueueAdd.svelte";
 
   /**
    * `similarities` is optional and parallel to `songs`: OpenSubsonic scores, null when unknown.
@@ -18,7 +18,6 @@
   const current = $derived(namespace !== null && namespace === store.browseKey && store.connection === "open" && !store.invalid);
   const playing = $derived(store.player?.current?.entry.track ?? null);
   const sonic = (song) => current && store.supportsSonic(song.library) && store.browseItemCurrent({ library: song.library, namespace });
-  const decks = $derived(store.player?.dj ? ["A", "B"] : []);
 </script>
 
 <ol class="rows card" aria-label="Tracks">
@@ -52,9 +51,7 @@
         {/if}
         <button class="icon-btn" disabled={!store.player || !current} aria-label="Add {song.title} to queue" title="Add to queue" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace })}><Icon name="add" /></button>
         <button class="icon-btn" disabled={!store.player || !current} aria-label="Play {song.title} next" title="Play next" onclick={() => store.add(store.selected, { kind: "song", library: song.library, id: song.id, namespace }, 0)}><Icon name="next" /></button>
-        {#each decks as letter, deck (letter)}
-          <button class="icon-btn deck-load" disabled={!current} aria-label="Load {song.title} onto deck {letter}" title="Load onto deck {letter}" onclick={() => dj.load(store.selected, deck, { library: song.library, id: song.id, namespace })}>{letter}</button>
-        {/each}
+        <DeckQueueAdd item={{ kind: "song", library: song.library, id: song.id, namespace }} title={song.title} disabled={!current} />
         <AddToPlaylist library={song.library} songs={[song.id]} title={song.title} {namespace} />
         {#if onremove}<button class="icon-btn" disabled={!current} aria-label="Remove {song.title} from this playlist" title="Remove from playlist" onclick={() => onremove(i, song)}><Icon name="remove" /></button>{/if}
         <SongRating library={song.library} songId={song.id} title={song.title} {namespace} />
@@ -67,6 +64,5 @@
   li { cursor: grab; }
   .similarity { flex: none; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
   .actions { display: flex; align-items: center; }
-  .deck-load { font-weight: 700; font-size: 0.85rem; }
   @media (max-width: 480px) { .row-number, .row-duration { display: none; } .actions { flex-wrap: wrap; justify-content: flex-end; max-width: 8.5rem; } }
 </style>

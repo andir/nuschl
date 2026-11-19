@@ -5,6 +5,7 @@
   import { startItemDrag } from "../dnd.js";
   import Cover from "./Cover.svelte";
   import Icon from "./Icon.svelte";
+  import DeckQueueAdd from "./DeckQueueAdd.svelte";
 
   let { item, namespace, kind = "album" } = $props();
   const current = $derived(store.browseItemCurrent({ library: item.library, namespace }));
@@ -41,6 +42,7 @@
     <div class="tile-actions">
       <button class="icon-btn" disabled={!store.player || !current} aria-label="Add {item.name} to queue" title="Add to queue" onclick={() => store.add(store.selected, { kind, library: item.library, id: item.id, namespace })}><Icon name="add" /></button>
       <button class="icon-btn" disabled={!store.player || !current} aria-label="Play {item.name} next" title="Play next" onclick={() => store.add(store.selected, { kind, library: item.library, id: item.id, namespace }, 0)}><Icon name="next" /></button>
+      <DeckQueueAdd item={{ kind, library: item.library, id: item.id, namespace }} title={item.name} disabled={!current} />
     </div>
   {/if}
 </article>
