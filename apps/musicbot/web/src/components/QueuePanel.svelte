@@ -159,6 +159,7 @@
   .deck-list { list-style: none; margin: 0 0 0.4rem; padding: 0; display: grid; gap: 0.35rem; }
   .deck-list li { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
   .deck-load { font-weight: 700; font-size: 0.85rem; }
+  .compact .row-actions:has(.deck-load) { display: grid; grid-template-columns: repeat(2, auto); }
   .queue-choice select { width: 100%; }
   .queue-meta { font-size: 0.8rem; font-variant-numeric: tabular-nums; }
   .now-playing { margin-top: 1rem; }
