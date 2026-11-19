@@ -5,13 +5,25 @@
   import Icon from "./Icon.svelte";
   import DjDeck from "./DjDeck.svelte";
   import DjMixer from "./DjMixer.svelte";
+  import MidiPanel from "./MidiPanel.svelte";
+  import { midi } from "../midi.svelte.js";
 
-  let { learning = null } = $props();
+  const learning = $derived(midi.learning);
   const selected = $derived(store.selected);
   const player = $derived(store.player);
   const players = $derived(store.snapshot?.players ?? []);
   const mix = $derived(player?.dj ?? null);
   let switching = $state(false);
+
+  // In learn mode a press on a control picks it for MIDI learn instead of using it.
+  function pick(event) {
+    if (!midi.learnMode) return;
+    const control = event.target.closest?.("[data-control]");
+    if (!control) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.type === "pointerdown") midi.learn(control.dataset.control);
+  }
 
   async function toggle() {
     switching = true;
@@ -46,12 +58,13 @@
     </div>
   {:else}
     {#if mix.notice}<p class="notice error" role="alert">{mix.notice}</p>{/if}
-    <div class="decks">
+    <div class="decks" class:learn-mode={midi.learnMode} onpointerdowncapture={pick} onclickcapture={pick}>
       <DjDeck player={selected} deck={0} data={mix.decks[0]} {learning} />
       <DjMixer player={selected} {mix} {learning} />
       <DjDeck player={selected} deck={1} data={mix.decks[1]} {learning} />
     </div>
     <p class="muted small">Load songs with the A and B buttons in the library, playlists and the queue. Double-click a fader or knob to return it to its middle.</p>
+    <MidiPanel />
   {/if}
 </section>
 
@@ -61,6 +74,8 @@
   .intro p:first-child { margin-top: 0; }
   .decks { display: grid; grid-template-columns: minmax(0, 1fr) minmax(13rem, 16rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
   .notice.error { margin-bottom: 1rem; }
+  .learn-mode :global([data-control]) { outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; cursor: crosshair; }
+  .learn-mode :global([data-control].learning) { outline: 2px solid var(--accent); background: var(--accent-soft); }
   @media (max-width: 1250px) {
     .decks { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     .decks > :global(.mixer) { grid-column: 1 / -1; grid-row: 2; }

@@ -13,6 +13,8 @@ const HOLD_MS = 700;
 class Dj {
   /** Values of controls being moved, by key (`player:deck:name` or `player:name`). */
   local = $state.raw({});
+  /** The length of the one-button fade, in seconds; the page and MIDI share it. */
+  fadeSeconds = $state(8);
   #senders = new Map();
   #releases = new Map();
 

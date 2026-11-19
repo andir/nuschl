@@ -699,3 +699,158 @@ export function paced(send, ms, now = () => Date.now()) {
   call.idle = () => !busy && pending === null;
   return call;
 }
+
+// Web MIDI. A mapping binds DJ controls to the controls of one MIDI device.
+
+/** Every DJ control MIDI can drive: `id`, `label`, `kind` ("range" or "button") and, for ranges, `center`. */
+export function djControls() {
+  const controls = [];
+  for (const [deck, letter] of [[0, "A"], [1, "B"]]) {
+    controls.push(
+      { id: `${deck}.play`, label: `Play or pause deck ${letter}`, kind: "button" },
+      { id: `${deck}.cue`, label: `Go to the cue point of deck ${letter}`, kind: "button" },
+      { id: `${deck}.setCue`, label: `Set the cue point of deck ${letter}`, kind: "button" },
+      { id: `${deck}.loadNext`, label: `Load the queue's next song onto deck ${letter}`, kind: "button" },
+      { id: `${deck}.eject`, label: `Eject deck ${letter}`, kind: "button" },
+      { id: `${deck}.eq.high`, label: `High EQ of deck ${letter}`, kind: "range", center: true },
+      { id: `${deck}.eq.mid`, label: `Mid EQ of deck ${letter}`, kind: "range", center: true },
+      { id: `${deck}.eq.low`, label: `Low EQ of deck ${letter}`, kind: "range", center: true },
+      { id: `${deck}.filter`, label: `Filter of deck ${letter}`, kind: "range", center: true },
+      { id: `${deck}.volume`, label: `Volume of deck ${letter}`, kind: "range", center: false },
+      { id: `${deck}.tempo`, label: `Tempo of deck ${letter}`, kind: "range", center: true },
+      { id: `${deck}.range`, label: `Tempo range of deck ${letter}`, kind: "button" },
+      { id: `${deck}.sync`, label: `Sync deck ${letter}`, kind: "button" },
+    );
+  }
+  controls.push(
+    { id: "crossfader", label: "Crossfader", kind: "range", center: true },
+    { id: "curve", label: "Crossfader curve", kind: "button" },
+    { id: "transition", label: "Fade to the other deck", kind: "button" },
+    { id: "autoLoad", label: "Auto load", kind: "button" },
+  );
+  return controls;
+}
+
+/**
+ * A MIDI message as `{ type: "cc" | "note", channel, number, value }`, with
+ * note-off and note-on at velocity 0 as value 0; null for other messages.
+ */
+export function parseMidi(data) {
+  if (!data || data.length < 3) return null;
+  const status = data[0] & 0xf0;
+  const message = { channel: data[0] & 0x0f, number: data[1] & 0x7f, value: data[2] & 0x7f };
+  if (status === 0xb0) return { type: "cc", ...message };
+  if (status === 0x90) return { type: "note", ...message };
+  if (status === 0x80) return { type: "note", ...message, value: 0 };
+  return null;
+}
+
+/**
+ * The binding learned for `control` from the messages a learn window
+ * collected, or null when none fits: ranges take a control change (14-bit
+ * "fine" when the same channel also sent its LSB, controller number + 32),
+ * buttons a note or a control change.
+ */
+export function learnBinding(control, messages) {
+  const first = messages.find((message) => message && (message.type === "cc" || control.kind === "button"));
+  if (!first) return null;
+  const binding = { type: first.type, channel: first.channel, number: first.number, mode: "absolute" };
+  if (control.kind === "range" && first.number < 32
+    && messages.some((message) => message?.type === "cc" && message.channel === first.channel && message.number === first.number + 32)) {
+    binding.mode = "fine";
+  }
+  return binding;
+}
+
+/** The step of a relative encoder value: 1…63 up, 65…127 down (two's complement), 64 none. */
+export function relativeDelta(value) {
+  return value === 64 ? 0 : value < 64 ? value : value - 128;
+}
+
+/** A button press: note-on, or a control change at 64 or more. Releases send nothing. */
+export function midiPressed(message) {
+  return message.value >= (message.type === "note" ? 1 : 64);
+}
+
+/** The fraction 0…1 of a range control from a 7-bit value, or from 14 bits with `lsb`. */
+export function midiFraction(value, lsb = null) {
+  return lsb === null ? clamp(value / 127, 0, 1) : clamp(((value << 7) | lsb) / 16383, 0, 1);
+}
+
+/**
+ * The value of DJ control `id` for a fraction of its travel. Controls with a
+ * middle rest there (0 dB, neutral, centre, 0 %) across the two middle steps
+ * of a 7-bit knob. `range` is the deck's tempo range in percent.
+ */
+export function controlValue(id, fraction, range = 8) {
+  let f = clamp(fraction, 0, 1);
+  if (!id.endsWith("volume") && Math.abs(f - 0.5) < 0.75 / 127) f = 0.5;
+  if (id.endsWith("volume")) return Math.round(f * 100);
+  if (id.includes(".eq.")) return f < 0.5 ? DJ_EQ_MIN * (1 - f * 2) : DJ_EQ_MAX * (f - 0.5) * 2;
+  if (id.endsWith("tempo")) return (f * 2 - 1) * range;
+  return f * 2 - 1;
+}
+
+/** The fraction of travel of DJ control `id` at `value`: the inverse of controlValue. */
+export function controlFraction(id, value, range = 8) {
+  if (id.endsWith("volume")) return clamp(value / 100, 0, 1);
+  if (id.includes(".eq.")) return clamp(value < 0 ? 0.5 - value / DJ_EQ_MIN / 2 : 0.5 + value / DJ_EQ_MAX / 2, 0, 1);
+  if (id.endsWith("tempo")) return clamp((value / range + 1) / 2, 0, 1);
+  return clamp((value + 1) / 2, 0, 1);
+}
+
+/** localStorage key of the mapping for the MIDI device named `name`. */
+export function midiStorageKey(name) {
+  return `nuschl-musicbot:midi:${String(name).slice(0, 200)}`;
+}
+
+const MIDI_TYPES = new Set(["cc", "note"]);
+const MIDI_MODES = new Set(["absolute", "fine", "relative"]);
+const isByte = (value, max) => Number.isInteger(value) && value >= 0 && value <= max;
+
+/** A stored mapping (JSON) read back as `{ control: binding }`: unknown controls and malformed bindings drop out. */
+export function parseMapping(text, controls = djControls()) {
+  let stored;
+  try {
+    stored = typeof text === "string" && text.length <= 65536 ? JSON.parse(text) : null;
+  } catch {
+    return {};
+  }
+  const mapping = {};
+  if (stored?.version !== 1 || typeof stored.controls !== "object" || stored.controls === null) return mapping;
+  for (const control of controls) {
+    const binding = stored.controls[control.id];
+    if (!binding || !MIDI_TYPES.has(binding.type) || !isByte(binding.channel, 15) || !isByte(binding.number, 127)) continue;
+    const mode = MIDI_MODES.has(binding.mode) ? binding.mode : "absolute";
+    if (control.kind === "range" && binding.type !== "cc") continue;
+    if (mode === "fine" && binding.number >= 32) continue;
+    mapping[control.id] = { type: binding.type, channel: binding.channel, number: binding.number, mode: control.kind === "button" ? "absolute" : mode };
+  }
+  return mapping;
+}
+
+/** The JSON a mapping is stored as. */
+export function serializeMapping(mapping) {
+  return JSON.stringify({ version: 1, controls: mapping });
+}
+
+/**
+ * The controls `message` drives under `mapping`: `{ id, binding, lsb }`,
+ * where `lsb` marks the low half of a 14-bit control.
+ */
+export function boundControls(mapping, message) {
+  const found = [];
+  for (const [id, binding] of Object.entries(mapping)) {
+    if (binding.type !== message.type || binding.channel !== message.channel) continue;
+    if (binding.number === message.number) found.push({ id, binding, lsb: false });
+    else if (binding.mode === "fine" && binding.number + 32 === message.number) found.push({ id, binding, lsb: true });
+  }
+  return found;
+}
+
+/** How a binding reads in the mapping table, such as "CC 7, channel 1". */
+export function bindingText(binding) {
+  if (!binding) return "—";
+  const what = binding.type === "note" ? `Note ${binding.number}` : `CC ${binding.number}`;
+  return `${what}, channel ${binding.channel + 1}${binding.mode === "fine" ? ", 14-bit" : ""}`;
+}

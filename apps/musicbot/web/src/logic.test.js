@@ -10,7 +10,8 @@ import {
   isImportId, releaseTypeLabel, requestStatusText, requestProgress, budgetText, coverRetryDelay, COVER_RETRIES,
   groupPlaylists, editablePlaylists, lyricLineAt, artistJumps, suggestionQuery, suggestionStep, filterGenres,
   deckPosition, deckBpm, crossfadeGains, leadDeck, transitionPosition, decibelText, filterText, tempoText,
-  crossfaderText, paced,
+  crossfaderText, paced, djControls, parseMidi, learnBinding, relativeDelta, midiPressed, midiFraction,
+  controlValue, controlFraction, midiStorageKey, parseMapping, serializeMapping, boundControls, bindingText,
 } from "./logic.js";
 
 test("formatDuration", () => {
@@ -748,4 +749,123 @@ test("paced sends the newest value, one request at a time and at most once per i
   } finally {
     mock.timers.reset();
   }
+});
+
+test("MIDI can drive every DJ control once", () => {
+  const controls = djControls();
+  assert.equal(controls.length, 30);
+  assert.equal(new Set(controls.map((control) => control.id)).size, controls.length);
+  for (const control of controls) assert.ok(control.kind === "range" || control.kind === "button", control.id);
+  assert.deepEqual(controls.filter((control) => control.kind === "range" && !control.center).map((control) => control.id), ["0.volume", "1.volume"]);
+});
+
+test("MIDI messages parse into control changes and notes", () => {
+  assert.deepEqual(parseMidi([0xb3, 7, 100]), { type: "cc", channel: 3, number: 7, value: 100 });
+  assert.deepEqual(parseMidi(new Uint8Array([0x90, 60, 127])), { type: "note", channel: 0, number: 60, value: 127 });
+  assert.deepEqual(parseMidi([0x9f, 60, 0]), { type: "note", channel: 15, number: 60, value: 0 });
+  assert.deepEqual(parseMidi([0x81, 60, 64]), { type: "note", channel: 1, number: 60, value: 0 });
+  assert.equal(parseMidi([0xe0, 0, 64]), null, "pitch bend");
+  assert.equal(parseMidi([0xf8]), null, "clock");
+  assert.equal(parseMidi(null), null);
+});
+
+test("learning binds ranges to control changes, with 14 bits when the LSB follows", () => {
+  const fader = { id: "0.volume", kind: "range" };
+  const button = { id: "0.play", kind: "button" };
+  const note = { type: "note", channel: 0, number: 11, value: 127 };
+  const cc = (number, value = 64, channel = 0) => ({ type: "cc", channel, number, value });
+  assert.equal(learnBinding(fader, [note]), null);
+  assert.deepEqual(learnBinding(fader, [note, cc(7)]), { type: "cc", channel: 0, number: 7, mode: "absolute" });
+  assert.deepEqual(learnBinding(fader, [cc(4), cc(36), cc(4)]), { type: "cc", channel: 0, number: 4, mode: "fine" });
+  assert.deepEqual(learnBinding(fader, [cc(4), cc(36, 0, 2)]), { type: "cc", channel: 0, number: 4, mode: "absolute" });
+  assert.deepEqual(learnBinding(fader, [cc(40), cc(72)]), { type: "cc", channel: 0, number: 40, mode: "absolute" });
+  assert.deepEqual(learnBinding(button, [note]), { type: "note", channel: 0, number: 11, mode: "absolute" });
+  assert.deepEqual(learnBinding(button, [cc(20, 127)]), { type: "cc", channel: 0, number: 20, mode: "absolute" });
+  assert.equal(learnBinding(button, []), null);
+});
+
+test("MIDI values convert to fractions, steps and presses", () => {
+  assert.equal(midiFraction(0), 0);
+  assert.equal(midiFraction(127), 1);
+  assert.equal(midiFraction(127, 127), 1);
+  assert.equal(midiFraction(64, 0), 8192 / 16383);
+  assert.equal(relativeDelta(1), 1);
+  assert.equal(relativeDelta(3), 3);
+  assert.equal(relativeDelta(127), -1);
+  assert.equal(relativeDelta(125), -3);
+  assert.equal(relativeDelta(64), 0);
+  assert.equal(midiPressed({ type: "note", value: 1 }), true);
+  assert.equal(midiPressed({ type: "note", value: 0 }), false);
+  assert.equal(midiPressed({ type: "cc", value: 127 }), true);
+  assert.equal(midiPressed({ type: "cc", value: 63 }), false);
+});
+
+test("control values rest in the middle of a knob's travel and invert", () => {
+  assert.equal(controlValue("0.volume", 0), 0);
+  assert.equal(controlValue("0.volume", 1), 100);
+  assert.equal(controlValue("0.volume", 64 / 127), 50);
+  for (const middle of [63 / 127, 64 / 127]) {
+    assert.equal(controlValue("0.eq.low", middle), 0);
+    assert.equal(controlValue("1.filter", middle), 0);
+    assert.equal(controlValue("crossfader", middle), 0);
+    assert.equal(controlValue("0.tempo", middle, 16), 0);
+  }
+  assert.equal(controlValue("0.eq.mid", 0), -26);
+  assert.equal(controlValue("0.eq.high", 1), 6);
+  assert.equal(controlValue("0.eq.high", 0.25), -13);
+  assert.equal(controlValue("1.tempo", 1, 16), 16);
+  assert.equal(controlValue("1.tempo", 0, 8), -8);
+  assert.equal(controlValue("crossfader", 0), -1);
+  assert.equal(controlValue("0.filter", 2), 1);
+  for (const [id, value, range] of [["0.volume", 37, 8], ["0.eq.low", -13, 8], ["0.eq.low", 3, 8], ["1.tempo", 4, 16], ["crossfader", 0.5, 8], ["0.filter", -0.2, 8]]) {
+    assert.ok(Math.abs(controlValue(id, controlFraction(id, value, range), range) - value) < 1e-9, `${id} ${value}`);
+  }
+});
+
+test("stored mappings keep only known controls with valid bindings", () => {
+  const mapping = {
+    "0.volume": { type: "cc", channel: 0, number: 7, mode: "absolute" },
+    "1.tempo": { type: "cc", channel: 1, number: 2, mode: "fine" },
+    "0.play": { type: "note", channel: 0, number: 11, mode: "absolute" },
+    crossfader: { type: "cc", channel: 0, number: 8, mode: "relative" },
+  };
+  assert.deepEqual(parseMapping(serializeMapping(mapping)), mapping);
+  const stored = JSON.stringify({
+    version: 1,
+    controls: {
+      ...mapping,
+      "0.filter": { type: "note", channel: 0, number: 3 },
+      "0.eq.low": { type: "cc", channel: 16, number: 3 },
+      "0.eq.mid": { type: "cc", channel: 0, number: 40, mode: "fine" },
+      "0.eq.high": { type: "cc", channel: 0, number: 41, mode: "loud" },
+      "1.play": { type: "note", channel: 0, number: 12, mode: "relative" },
+      "0.scratch": { type: "cc", channel: 0, number: 1 },
+    },
+  });
+  assert.deepEqual(parseMapping(stored), {
+    ...mapping,
+    "0.eq.high": { type: "cc", channel: 0, number: 41, mode: "absolute" },
+    "1.play": { type: "note", channel: 0, number: 12, mode: "absolute" },
+  });
+  for (const broken of [null, "", "{", "[]", JSON.stringify({ version: 2, controls: mapping }), "x".repeat(70000)]) {
+    assert.deepEqual(parseMapping(broken), {}, String(broken).slice(0, 20));
+  }
+  assert.equal(midiStorageKey("DDJ-400"), "nuschl-musicbot:midi:DDJ-400");
+  assert.equal(midiStorageKey("x".repeat(300)).length, "nuschl-musicbot:midi:".length + 200);
+});
+
+test("messages reach their bound controls, 14-bit ones through both halves", () => {
+  const mapping = {
+    "0.volume": { type: "cc", channel: 0, number: 7, mode: "absolute" },
+    "1.tempo": { type: "cc", channel: 1, number: 2, mode: "fine" },
+    "0.play": { type: "note", channel: 0, number: 7, mode: "absolute" },
+  };
+  assert.deepEqual(boundControls(mapping, { type: "cc", channel: 0, number: 7, value: 1 }).map((bound) => bound.id), ["0.volume"]);
+  assert.deepEqual(boundControls(mapping, { type: "note", channel: 0, number: 7, value: 1 }).map((bound) => bound.id), ["0.play"]);
+  assert.deepEqual(boundControls(mapping, { type: "cc", channel: 1, number: 34, value: 1 }), [{ id: "1.tempo", binding: mapping["1.tempo"], lsb: true }]);
+  assert.deepEqual(boundControls(mapping, { type: "cc", channel: 1, number: 2, value: 1 })[0].lsb, false);
+  assert.deepEqual(boundControls(mapping, { type: "cc", channel: 2, number: 7, value: 1 }), []);
+  assert.equal(bindingText(mapping["1.tempo"]), "CC 2, channel 2, 14-bit");
+  assert.equal(bindingText(mapping["0.play"]), "Note 7, channel 1");
+  assert.equal(bindingText(undefined), "—");
 });

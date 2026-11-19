@@ -60,7 +60,7 @@
         <div class="deck-sub muted">Deck {letter} is empty. Load a song from the library, a playlist or the queue.</div>
       {/if}
     </div>
-    <div class="bpm" title={data.bpm ? `${data.bpm} BPM in the library` : "The library gives no BPM for this song"}>
+    <div class="bpm" title={data.bpm ? `${data.bpm} BPM in the library` : "BPM unknown: sync needs the library's BPM of both songs"}>
       <span class="bpm-value num">{bpm === null ? "—" : bpm.toFixed(1)}</span>
       <span class="eyebrow">BPM</span>
     </div>
@@ -97,16 +97,16 @@
     <button class="btn" class:learning={learnClass(`${deck}.setCue`)} data-control="{deck}.setCue" disabled={!track} title="Set the cue point here" onclick={() => dj.setCue(player, deck)}>Set cue</button>
     <button class="icon-btn" class:active={cueing} disabled={!track && !cueing} aria-pressed={cueing} aria-label="Hear deck {letter} on headphones in this browser" title={cueing ? "Stop the headphone cue" : "Hear this deck before its fader, only in this browser"} onclick={() => cueListening.toggle(player, deck)}><Icon name="headphones" /></button>
     <button class="icon-btn" class:learning={learnClass(`${deck}.loadNext`)} data-control="{deck}.loadNext" aria-label="Load the queue's next song onto deck {letter}" title="Load next from the queue" onclick={() => dj.loadNext(player, deck)}><Icon name="next" /></button>
-    <button class="icon-btn" disabled={!track} aria-label="Eject deck {letter}" title="Eject" onclick={() => dj.eject(player, deck)}><Icon name="eject" /></button>
+    <button class="icon-btn" class:learning={learnClass(`${deck}.eject`)} data-control="{deck}.eject" disabled={!track} aria-label="Eject deck {letter}" title="Eject" onclick={() => dj.eject(player, deck)}><Icon name="eject" /></button>
   </div>
 
   <div class="strip">
     <div class="eq" role="group" aria-label="EQ and filter of deck {letter}">
       {#each bands as band (band.band)}
-        <DjSlider vertical label={band.label} value={band.value} min={DJ_EQ_MIN} max={DJ_EQ_MAX} step="0.5" reset={0} text={decibelText(band.value)}
+        <DjSlider vertical label={band.label} value={band.value} min={DJ_EQ_MIN} max={DJ_EQ_MAX} step="0.5" reset={0} text={decibelText(band.value)} shown={decibelText(band.value).replace(" dB", "").replace(", cut", "")}
           control="{deck}.eq.{band.band}" learning={learnClass(`${deck}.eq.${band.band}`)} onchange={(db) => dj.eq(player, deck, band.band, db)} />
       {/each}
-      <DjSlider vertical label="Filter" value={filter} min={-1} max={1} step="0.01" reset={0} text={filterText(filter)}
+      <DjSlider vertical label="Filter" value={filter} min={-1} max={1} step="0.01" reset={0} text={filterText(filter)} shown={filterText(filter).replace("Low-pass", "LP").replace("High-pass", "HP").replace(" %", "")}
         control="{deck}.filter" learning={learnClass(`${deck}.filter`)} onchange={(value) => dj.filter(player, deck, value)} />
     </div>
     <div class="fader">
@@ -116,9 +116,9 @@
     <div class="tempo" role="group" aria-label="Tempo of deck {letter}">
       <DjSlider vertical label="Tempo" value={tempo} min={-data.tempo_range} max={data.tempo_range} step="0.05" reset={0} text={tempoText(tempo)}
         control="{deck}.tempo" learning={learnClass(`${deck}.tempo`)} onchange={(value) => dj.tempo(player, deck, value, data.tempo_range)} />
-      <div class="range" role="radiogroup" aria-label="Tempo range of deck {letter}">
+      <div class="range" class:learning={learnClass(`${deck}.range`)} data-control="{deck}.range" role="radiogroup" aria-label="Tempo range of deck {letter}">
         {#each DJ_TEMPO_RANGES as range (range)}
-          <button class="chip" role="radio" aria-checked={data.tempo_range === range} onclick={() => dj.tempoRange(player, deck, range)}>±{range} %</button>
+          <button class="chip" role="radio" aria-checked={data.tempo_range === range} aria-label="±{range} %" onclick={() => dj.tempoRange(player, deck, range)}>±{range}</button>
         {/each}
       </div>
       <button class="btn sync" class:learning={learnClass(`${deck}.sync`)} data-control="{deck}.sync" disabled={!data.bpm} title="Match the other deck's BPM" onclick={() => dj.sync(player, deck)}><Icon name="sync" size={16} />Sync</button>
@@ -145,11 +145,11 @@
   .play:hover:not(:disabled) { filter: brightness(1.08); }
   .play:disabled { opacity: 0.4; }
   .transport .btn { padding: 0.4rem 0.75rem; }
-  .strip { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 1fr) minmax(0, 1.6fr); gap: 0.75rem; align-items: start; padding-top: 0.5rem; border-top: 1px solid var(--border); }
-  .eq { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.25rem; }
+  .strip { display: grid; grid-template-columns: minmax(0, 4fr) minmax(3rem, 1fr) minmax(5.5rem, 1.5fr); gap: 0.5rem; align-items: start; padding-top: 0.5rem; border-top: 1px solid var(--border); }
+  .eq { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.15rem; }
   .fader { display: grid; justify-items: center; }
   .tempo { display: grid; justify-items: center; gap: 0.4rem; }
-  .range { display: flex; gap: 0.25rem; }
+  .range { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.25rem; }
   .chip { padding: 0.15rem 0.45rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
   .chip[aria-checked="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
   .sync { padding: 0.3rem 0.6rem; font-size: 0.85rem; }

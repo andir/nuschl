@@ -9,7 +9,6 @@
 
   let { player, mix, learning = null } = $props();
   const id = $props.id();
-  let seconds = $state(8);
   let now = $state(performance.now());
   const transition = $derived(mix.transition);
   $effect(() => {
@@ -38,7 +37,7 @@
     <div class="ends muted small" aria-hidden="true"><span>A</span><span>B</span></div>
   </div>
 
-  <div class="curve" role="radiogroup" aria-label="Crossfader curve">
+  <div class="curve" class:learning={learning === "curve"} data-control="curve" role="radiogroup" aria-label="Crossfader curve">
     <button class="chip" role="radio" aria-checked={mix.curve === "smooth"} title="Constant power: both decks at −3 dB in the middle" onclick={() => dj.curve(player, "smooth")}>Smooth</button>
     <button class="chip" role="radio" aria-checked={mix.curve === "cut"} title="Both decks at full level, cut at the ends" onclick={() => dj.curve(player, "cut")}>Cut</button>
   </div>
@@ -46,11 +45,11 @@
   <div class="transition">
     <label class="seconds">
       <span>Fade time</span>
-      <select bind:value={seconds}>
+      <select bind:value={dj.fadeSeconds}>
         {#each DJ_TRANSITION_SECONDS as choice (choice)}<option value={choice}>{choice} s</option>{/each}
       </select>
     </label>
-    <button class="btn primary" class:learning={learning === "transition"} data-control="transition" disabled={!mix.decks[target].entry} onclick={() => dj.transition(player, seconds)}>
+    <button class="btn primary" class:learning={learning === "transition"} data-control="transition" disabled={!mix.decks[target].entry} onclick={() => dj.transition(player, dj.fadeSeconds)}>
       <Icon name="decks" size={18} />Fade to {targetLetter}
     </button>
     {#if transition}
@@ -58,7 +57,7 @@
     {/if}
   </div>
 
-  <label class="auto-load">
+  <label class="auto-load" class:learning={learning === "autoLoad"} data-control="autoLoad">
     <input type="checkbox" checked={mix.auto_load} onchange={(event) => dj.autoLoad(player, event.currentTarget.checked)} />
     <span>Auto load: after a fade or at the end of a song, the silent deck takes the queue's next song</span>
   </label>
