@@ -439,7 +439,16 @@ length and continuity at five tempos, gain ramps, the limiter, the transition
 timeline, position accounting, auto load, failure back-off, entering and leaving,
 control ranges, cue admission, the SSE rate, and in the real playback loop with
 controlled decoders that two decks hold exactly two decoders that retire before
-the queue resumes.
+the queue resumes. The deck queue, preload, BPM and loop tests cover deck-queue
+auto load and requeueing, saved deck queues, cue jumps that play in the next
+frame from memory and jumps past the decoded part that wait, preloading the next
+deck-queue song, the memory budget, the 30-minute cap, decode children counted
+and reaped, preload back-off, the beat grid within 10 ms on synthetic beats with
+intro silence and swing, tempo within 1 BPM at 85 to 174 BPM, loop lengths exact
+in samples at several tempos, the loop crossfade, quantised and free loop points,
+beat loops at several BPMs, the cache's bound and restart, band energies on
+tones and noise, column timing, and bounded spectrum ranges bound to the deck's
+song.
 Frontend tests cover progress interpolation, scrubbing, drag indices, route
 encoding, shortcuts, and history pagination during live refreshes.
 `tests/musicbot.py` drives the JSON API and two SSE viewers against stock Murmur
@@ -520,8 +529,8 @@ at its position with its decoder; with auto load on, the queue's next song waits
 on deck B, paused. **Leave DJ mode** continues the lead deck's song (the playing
 one, else the louder one) as the queue's current song from its position.
 
-Each deck has title, artist and cover; the song's BPM at the deck's tempo when
-the library gives one (OpenSubsonic `bpm`); the position with a seek slider,
+Each deck has title, artist and cover; the song's BPM at the deck's tempo (see
+BPM and beat grid); the position with a seek slider,
 play/pause, **Cue** (go to the cue point), **Set cue**, load next and eject; a
 3-band EQ (low shelf 250 Hz, mid peak 1 kHz, high shelf 2.5 kHz, −26 to +6 dB),
 a filter knob (low-pass down to 60 Hz on the left, high-pass up to 8 kHz on the
@@ -536,12 +545,99 @@ The mixer has the crossfader with a **Smooth** curve (constant power, each deck
 at −3 dB in the middle) or a **Cut** curve (both decks at full level, cut within
 the last 4 % of the travel), **Fade to A/B**, which moves the crossfader to the
 other deck over the chosen time and starts that deck, and **Auto load**: after a
-fade the deck that went silent pauses and takes the queue's next song, and a deck
-whose song ends takes the next one too. Moving the crossfader stops a fade where
-it is. Song rows in the library, playlists and the queue get **A** and **B**
-buttons; a queue song leaves the queue, and a queue song that leaves a deck before
-the room heard it returns to the front of the queue. Everyone with a link controls
-the decks.
+fade the deck that went silent pauses and takes its next song, and a deck whose
+song ends takes the next one too. Moving the crossfader stops a fade where it is.
+Everyone with a link controls the decks.
+
+**Deck queues.** In DJ mode each deck has its own queue under it (on phones: deck
+A, its queue, the mixer, deck B, its queue). Its rows reorder by drag or by
+Alt+Up/Down on their handle, and have **Load now**, moves to the other deck's
+queue or the main queue, and remove. The **A** and **B** buttons on library songs,
+albums, playlists and main-queue rows add to that deck's queue. A deck's next song
+(for **Load next**, auto load and the keyboard) is the first of its own queue,
+else the first of the main queue. A song that leaves a deck before the room heard
+it goes back to the front of the queue it came from. Deck queues have the main
+queue's cap (5,000 songs each), are saved with the queues in `queues.json`, and
+stay while DJ mode is off, hidden until it is on again.
+
+**Drag and drop.** Each deck takes the page's drags: library songs, albums and
+playlists, main-queue rows and deck-queue rows. A song loads onto the deck; an
+album or playlist puts its first song on the deck and the rest at the front of
+the deck's queue. The deck shows a highlight and "Drop to load onto deck A"
+while something is dragged over it. A deck queue takes drops at the gap the
+pointer points at, the main queue takes deck-queue rows back. Keyboard users use
+the **A**/**B** buttons and **Load now**.
+
+**Songs in memory.** Each deck's song, and the song each deck loads next, is
+decoded completely into memory as fast as its decode child delivers, as
+interleaved 16-bit stereo at 48 kHz (11.5 MB a minute). Playback, cue jumps,
+seeks and loops read from there: a jump inside the decoded part plays in the next
+frame, after the one-frame fade; a jump past it waits for decoding to reach it.
+The memory is one budget across the bot, `audio.preload_mib` (768 MiB by default,
+at most 16,384; 0 lets decks stream their songs as in the queue). Songs longer
+than 30 minutes or of unknown length and songs the budget cannot hold stream
+from a decoder like a queue song (a seek then restarts the decoder); a deck that
+streams a song (such as the queue's song carried onto deck A) keeps streaming it
+until its next seek or load, then plays it from memory once it is there. At most four preload decode
+children run at once across the bot, each keeping its process credit until it
+has exited; a playing deck's song comes before a paused deck's, and both before
+next songs, whose decoding stops for them and resumes later where it stopped.
+Next songs give way first when memory runs short, and a song's memory returns
+once it has left its deck and is no longer next. A preload failure fails that
+song; preloading waits 0.5 seconds after a failure, doubling up to 8 seconds,
+and stops with a notice after three failures in a row. The NixOS service sets no
+memory limit of its own; size `preload_mib` to the host.
+
+**BPM and beat grid.** A song's BPM comes from the library when it gives one
+(OpenSubsonic `bpm`, which Navidrome reads from the file's tags); otherwise the
+bot estimates it from the song in memory, and the deck shows "≈" and "BPM est."
+(and "Analysing…" while it runs). The estimate reads 60 seconds from 30 seconds
+into the song (from its start for songs under 90 seconds): a mono copy at 8 kHz,
+an onset envelope at 100 Hz from a 256-point spectrum in 15 bands, then tempo by
+a comb over the envelope's autocorrelation from 60 to 200 BPM, refined to 0.1
+BPM, with octave correction towards 80–170 BPM. Below a confidence of 0.15 the
+BPM stays unknown. The beat grid is the song's beats at a constant tempo: the
+library's BPM or the estimate, corrected by up to 0.5 % from the whole decoded
+song, and the first beat, found by matching the onset envelope against a pulse
+train at that tempo; below a confidence of 0.15 the grid stays unknown. One
+analysis runs at a time across the bot: a first one when the window is in
+memory, a final grid when the whole song is. Results are kept per library and
+song ID in `beats.json` in the state directory (private, replaced atomically,
+at most 20,000 songs, the oldest leaving first), so each song is analysed once.
+Sync uses the library's BPM or the estimate.
+
+**Loops.** Each deck loops from its song in memory. **In** and **Out** set a
+loop from the position, **Loop** turns it off or plays the last loop again from
+its start, the beat buttons make a loop of 1/4 to 32 beats from the current beat,
+½ and ×2 halve and double it, and ◀ ▶ move it by its length or by one beat (a
+deck playing inside a moving loop moves along). With **Quantise** on (the
+default) and a known beat grid, loop points snap to the nearest beat and beat
+loops start on the beat at or before the position; without a grid loops use the
+exact positions and the deck says the loop is free. A loop lasts a quarter beat to
+64 beats, or 10 ms to 60 seconds when free, and lies within the song. The loop is
+in song time, so tempo changes keep working inside it, and its end wraps to its
+start within the frame, sample-accurate, with a 5 ms equal-power crossfade. A
+seek or cue jump outside a playing loop turns it off; inside, it keeps looping.
+Songs a deck streams cannot loop. The deck's position bar and its waveform show
+the loop with handles to drag (snapping like the buttons) and, with a grid, beat
+ticks with bars emphasised.
+
+**Waveform.** Each deck draws its song around the playhead (±3, ±6 or ±12
+seconds) as a three-band waveform (low, mid, high in three theme colours) or,
+with **Spectrogram**, as a heat map of 24 bands, with the beat grid (bars every
+four beats drawn stronger), the cue point and the loop, whose ends drag here too.
+An overview strip above the position bar shows the whole song with the visible
+part and the loop. The bot computes the band energies from the song in memory as
+it decodes, one 20 ms frame of work at a time: a mono 12 kHz copy through biquad
+filter banks, 100 columns per second of song time, 3 coarse bands (20–250 Hz,
+250 Hz–2.5 kHz, 2.5–5.6 kHz) and 24 log-spaced bands from 40 Hz to 5.5 kHz, one
+byte per band in dB (27 bytes per column, about 1.6 MB for a 10-minute song). They
+live with the song's PCM and leave with it; `beats.json` keeps no waveforms. The
+page asks for the columns around the visible window (up to 2,000 per request),
+keeps them per song, and draws at the deck's tempo from the position it
+interpolates between state events; it redraws every animation frame while the
+deck plays and the page is visible, and only on changes otherwise. Songs a deck
+streams show a flat line with a note.
 
 **How it sounds.** Every control sets a target; the bot moves gains, EQ, filter
 and tempo towards it one step per 20 ms frame (settling in about 60 ms), ramps
@@ -551,12 +647,12 @@ both decks within full scale. The page sends a moving control about 30 times a
 second, one request at a time per control.
 
 **Latency.** A control reaches the mix after the network delay, typically 0.1 to
-0.3 seconds, plus up to 20 ms; Mumble and browsers add their own buffering. A seek
-or cue jump restarts that deck's decoder, like a queue seek; the other deck plays on.
+0.3 seconds, plus up to 20 ms; Mumble and browsers add their own buffering.
 
-**Limits.** Two decks per queue; each holds one decode child at most and starts a
-new one only after the old one has exited, so two loaded decks cost exactly two
-decode children, which exit when DJ mode ends. A decode failure fails that deck's
+**Limits.** Two decks per queue. A deck that streams holds one decode child at
+most and starts a new one only after the old one has exited; songs in memory use
+the preload decode children (at most four across the bot). All of a player's
+decode children exit when DJ mode ends. A decode failure fails that deck's
 song; the deck's next decoder waits 0.5 seconds, doubling per failure in a row up
 to 8 seconds, and after three failures in a row auto load stops with a notice.
 Three encoder failures in a row pause DJ mode with a notice. Four headphone cue
@@ -571,6 +667,43 @@ song, a fade with auto load, leaving DJ mode) the play enters the history like a
 queue play: completed at the end, skipped otherwise, failed on errors. Scrobbling
 uses the queue's threshold on heard time. Heard time counts the room's mix only;
 headphone cue audio stays out of it.
+
+**Keyboard shortcuts.** The DJ page is playable from the keyboard: the left hand
+plays deck A, the right hand deck B (the same keys six columns to the right), the
+mixer sits in the middle. Keys match by their place on the keyboard
+(`KeyboardEvent.code`), so they stay put on every layout; the panel shows each
+key's printed character where the browser tells it. Shortcuts act only on the DJ
+page and never while a text field, select or editable text has the focus; with
+Ctrl, Alt or Meta held the browser keeps the key. Space stays the page's play and
+pause for the queue (in DJ mode it holds and resumes the whole mix).
+
+| Action | Deck A | Deck B |
+| --- | --- | --- |
+| Play / pause | D | L |
+| Go to cue point / set it | F / Shift+F | ; / Shift+; |
+| Seek back / forward 4 s | A / Q | J / U |
+| Tempo down / up | S / W | K / I |
+| Volume down / up | C / E | . / O |
+| Filter towards low-pass / high-pass | Z / X | M / , |
+| Cut or restore low / mid / high EQ | 1 / 2 / 3 | 8 / 9 / 0 |
+| Sync | R | P |
+| Load the deck's next song | T | Y |
+| Headphone cue | V | / |
+| Loop in / out | Shift+Z / Shift+X | Shift+M / Shift+, |
+| Loop on/off (reloop) | Shift+D | Shift+L |
+| 4-beat / 8-beat loop | 4 / 5 | - / = |
+| Halve / double the loop | Shift+S / Shift+W | Shift+K / Shift+I |
+| Move the loop back / forward | Shift+A / Shift+Q | Shift+J / Shift+U |
+
+Mixer: G and H move the crossfader towards A and B (Shift+G and Shift+H to the
+ends), B fades to the other deck, N turns auto load on or off, and ? opens
+**Keyboard shortcuts**. A press moves a fader one step (volume 5 %, tempo 0.1 %,
+filter 0.05, crossfader 0.05); holding the key for a quarter second glides it
+(volume 50 % a second, tempo 1 %, filter 0.5, crossfader 1.0), and the browser's
+own key repeat is ignored. The panel lists every action with its key; **Change**
+binds the next key pressed (Escape cancels; a key bound elsewhere moves to the new
+action and the panel says so), **Unbind** frees one and **Reset to defaults**
+restores the layout. The bindings are kept in this browser's localStorage.
 
 **MIDI controllers.** In browsers with Web MIDI (Chromium-based, over HTTPS or on
 localhost), **Use a MIDI controller** lists the inputs. **Learn** beside a
@@ -924,7 +1057,17 @@ or null for the end. Successful commands return 204 and broadcast the new state.
 | Control | Fields | Range |
 | --- | --- | --- |
 | `mode` | `on` | turns DJ mode on or off |
-| `load` | `library` and `id` (a library song), or `entry` (a queue entry, which leaves the queue) | song ids of 1 to 128 bytes |
+| `load` | `library`, `id` and `kind` (`song`, the default, `album` or `playlist`: the first song onto the deck, the rest to the front of its queue), or `entry` (an entry of the main queue or a deck queue, which leaves its queue) | ids of 1 to 128 bytes |
+| `queue_add` | `library`, `id`, `kind`, `index` (null: the end) | adds to the deck's queue |
+| `queue_move` | `entry`, `deck` (0, 1, or null for the main queue), `index` (in that queue without the entry) | |
+| `queue_remove` | `entry` | |
+| `queue_clear` | `deck` | |
+| `loop_in`, `loop_out`, `loop_toggle` | — | |
+| `beat_loop` | `beats` | 0.25, 0.5, 1, 2, 4, 8, 16 or 32 |
+| `loop_resize` | `factor` | 0.5 or 2 |
+| `loop_move` | `by` (`loop` or `beat`), `direction` | −1 or 1 |
+| `loop_set` | `start_ms`, `end_ms` (song time) | within the first three hours; snapped to beats when quantising |
+| `quantize` | `on` | |
 | `eject`, `set_cue`, `jump_to_cue`, `sync` | — | |
 | `play` | `playing` | |
 | `seek` | `position_ms` (song time) | 0 to three hours, clamped to the song |
@@ -939,17 +1082,39 @@ or null for the end. Successful commands return 204 and broadcast the new state.
 | `auto_load` | `on` | |
 
 Values outside a range and unknown decks answer 400; a control the state refuses
-answers 409 with the reason (DJ mode off, an empty deck, a queue entry gone,
-sync without both BPMs or beyond 16 %, a fade to an empty deck).
+answers 409 with the reason (DJ mode off, an empty deck, a queue entry gone, a
+full queue, sync without both BPMs or beyond 16 %, a fade to an empty deck, a
+loop without its start, a beat loop without beats, a loop on a song that streams).
 Successful controls return 204. State/SSE gives each player `dj`: null, or
 `{"decks":[Deck,Deck],"crossfader":N,"curve":"smooth"|"cut","transition":
 {"to":N,"duration_ms":N,"elapsed_ms":N}|null,"auto_load":bool,"notice":"…"|null}`,
 where a Deck has `entry` (the queue's entry format, or null), `position_ms` (song
 time), `playing`, `buffering`, `advancing`, `cue_ms`, `volume`, `eq`
 (`{"low":N,"mid":N,"high":N}`), `filter`, `tempo` (percent), `tempo_range`,
-`bpm` (the library's BPM, or null), `error` and `cue_listeners`. Song time
-advances `tempo` percent faster than real time while `advancing`. In DJ mode the
-player's `current` is null.
+`bpm` (the library's BPM or the estimate, one decimal, or null), `bpm_source`
+(`library`, `estimate` or null), `analysing`, `loaded_ms` (how much of the song
+is decoded in memory, null while the deck streams), `preloaded` (all of it),
+`loop` (`{"start_ms":N,"end_ms":N|null,"active":bool}` or null), `quantize`,
+`grid` (`{"bpm":N,"first_beat_ms":N}` or null: beats at `first_beat_ms + k ·
+60000 / bpm` in song time), `error` and `cue_listeners`. Song time advances
+`tempo` percent faster than real time while `advancing`. In DJ mode the player's
+`current` is null. Every player also has `deck_queues`: two lists of entries in
+the queue's format, kept while DJ mode is off.
+
+`GET spectrum?player=N&deck=D&entry=E&view=coarse|fine&from=C&count=K` returns
+the band energies of deck D's song for the deck's waveform: `count` (1 to 2,000,
+default 2,000) columns from column `from`, as `application/octet-stream` with one
+byte per band and column, column after column. Column n covers song time n/100 s
+to (n+1)/100 s. `coarse` has 3 bands (20–250 Hz, 250 Hz–2.5 kHz, 2.5–5.6 kHz),
+`fine` 24 log-spaced bands from 40 Hz to 5.5 kHz, lowest first, scaled so white
+noise reads flat. A byte b is `b · 72 / 255 − 72` dB (0 at −72 dB or below, 255
+at 0 dB, a full-scale sine). Headers: `X-Spectrum-From`, `X-Spectrum-Columns`
+(columns computed so far), `X-Spectrum-Total` (the song's columns, 0 when its
+length is unknown) and `X-Spectrum-Bands`. `GET spectrum/overview` with the same
+`player`, `deck` and `entry` returns the whole song in 1,000 coarse columns (the
+loudest of each group; columns not yet computed read 0). Both answer 409 when
+deck D plays another song than `entry`, 404 while the song streams instead of
+being in memory, and 400 for other values. The page draws the numbers itself.
 
 Browsing uses `albums`, `album`, `artists`, `artist`, `genres`, `genre/albums`,
 `genre/songs`, `playlists`, `playlist`, `search` and `suggest` JSON endpoints.
