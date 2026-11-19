@@ -823,6 +823,7 @@ certificate_sha256 = "{pin}"
                 state_directory: directory.into(),
                 web_assets: None,
                 codec_worker: PathBuf::from("/nonexistent/nuschl-musicbot-codec-worker"),
+                preload: None,
                 libraries: Arc::new(Vec::new()),
                 players,
                 connections,

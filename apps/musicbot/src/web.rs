@@ -121,6 +121,8 @@ pub fn router(bot: Arc<Bot>) -> Router {
         .route("/u/{token}/api/listen", get(listen))
         .route("/u/{token}/api/cue", get(cue))
         .route("/u/{token}/api/dj", post(dj))
+        .route("/u/{token}/api/spectrum", get(spectrum))
+        .route("/u/{token}/api/spectrum/overview", get(spectrum_overview))
         .route("/u/{token}/api/command", post(command))
         .route("/u/{token}/api/rating", get(rating).post(set_rating))
         .route("/u/{token}/api/albums", get(albums))
@@ -924,6 +926,8 @@ struct PlayerView {
     history_revision: u64,
     /// DJ mode, while it is on.
     dj: Option<DjView>,
+    /// DJ mode's queue per deck, kept while DJ mode is off.
+    deck_queues: [Vec<EntryView>; DECKS],
 }
 
 #[derive(Serialize)]
@@ -952,10 +956,35 @@ struct DeckView {
     /// Percent.
     tempo: f64,
     tempo_range: u8,
-    /// The song's BPM from the library, before the tempo.
-    bpm: Option<u32>,
+    /// The song's BPM before the tempo: the library's, else the estimate.
+    bpm: Option<f64>,
+    /// "library" or "estimate".
+    bpm_source: Option<&'static str>,
+    /// The BPM estimate or beat grid is being computed.
+    analysing: bool,
+    /// How much of the song is decoded in memory; null while the deck streams.
+    loaded_ms: Option<u64>,
+    /// The whole song is in memory.
+    preloaded: bool,
+    #[serde(rename = "loop")]
+    looping: Option<LoopView>,
+    quantize: bool,
+    grid: Option<GridView>,
     error: Option<String>,
     cue_listeners: usize,
+}
+
+#[derive(Serialize)]
+struct LoopView {
+    start_ms: f64,
+    end_ms: Option<f64>,
+    active: bool,
+}
+
+#[derive(Serialize)]
+struct GridView {
+    bpm: f64,
+    first_beat_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -1040,6 +1069,10 @@ fn snapshot(bot: &Bot, you: &Owner) -> StateView {
                 }),
                 queue: state.queue.iter().map(entry).collect(),
                 history_revision: state.next_history_id.saturating_sub(1),
+                deck_queues: state
+                    .deck_queues
+                    .each_ref()
+                    .map(|queue| queue.iter().map(entry).collect()),
                 dj: state.dj.as_ref().map(|dj| {
                     let cue_listeners = player.cue_listeners();
                     let running =
@@ -1071,7 +1104,23 @@ fn snapshot(bot: &Bot, you: &Owner) -> StateView {
                                     filter: deck.filter,
                                     tempo: (f64::from(deck.tempo) * 1e6).round() / 1e4,
                                     tempo_range: deck.range,
-                                    bpm: deck.base_bpm(),
+                                    bpm: deck.base_bpm().map(|bpm| (bpm * 10.0).round() / 10.0),
+                                    bpm_source: deck.bpm_from_library().map(|library| {
+                                        if library { "library" } else { "estimate" }
+                                    }),
+                                    analysing: deck.analysing,
+                                    loaded_ms: deck.loaded.map(|frames| frames / 48),
+                                    preloaded: deck.preloaded,
+                                    looping: deck.looping.map(|looping| LoopView {
+                                        start_ms: looping.start / 48.0,
+                                        end_ms: looping.end.map(|end| end / 48.0),
+                                        active: looping.active,
+                                    }),
+                                    quantize: deck.quantize,
+                                    grid: deck.grid.map(|grid| GridView {
+                                        bpm: grid.bpm,
+                                        first_beat_ms: grid.first / 48.0,
+                                    }),
                                     error: deck.error.clone(),
                                     cue_listeners,
                                 }
@@ -1647,10 +1696,167 @@ async fn command(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Columns one spectrum request returns at most (20 s).
+const MAX_SPECTRUM_COLUMNS: usize = 2_000;
+/// Columns of a song's overview.
+const OVERVIEW_COLUMNS: usize = 1_000;
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum SpectrumView {
+    Coarse,
+    Fine,
+}
+
+#[derive(Deserialize)]
+struct SpectrumQuery {
+    player: usize,
+    deck: usize,
+    entry: u64,
+    view: Option<SpectrumView>,
+    from: Option<usize>,
+    count: Option<usize>,
+}
+
+/// The in-memory song of `deck` when it still is `entry`, and the song's
+/// expected column count (0 when its length is unknown).
+fn deck_buffer(
+    bot: &Bot,
+    token: &str,
+    query: &SpectrumQuery,
+) -> Result<(Arc<crate::preload::Buffer>, usize), ApiError> {
+    owner(bot, token)?;
+    let player = bot
+        .players
+        .get(query.player)
+        .ok_or_else(|| bad("no such queue"))?;
+    deck_index(query.deck)?;
+    let total = {
+        let state = player.state();
+        let track = state
+            .dj
+            .as_ref()
+            .and_then(|dj| dj.decks[query.deck].track.as_ref())
+            .filter(|playing| playing.entry.id == query.entry)
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "That deck plays another song now.".to_owned(),
+                )
+            })?;
+        track.entry.track.duration.map_or(0, |seconds| {
+            seconds as usize * crate::spectrum::COLUMNS_PER_SECOND
+        })
+    };
+    let buffer = bot
+        .preload
+        .as_ref()
+        .and_then(|pool| pool.buffer(query.player, query.entry))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "This song plays from the library; its waveform needs it in memory.".to_owned(),
+            )
+        })?;
+    Ok((buffer, total))
+}
+
+fn spectrum_response(
+    bytes: Vec<u8>,
+    from: usize,
+    columns: usize,
+    total: usize,
+    bands: usize,
+) -> Response {
+    let number = |value: usize| HeaderValue::from(value as u64);
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(HeaderName::from_static("x-spectrum-from"), number(from));
+    headers.insert(
+        HeaderName::from_static("x-spectrum-columns"),
+        number(columns),
+    );
+    headers.insert(HeaderName::from_static("x-spectrum-total"), number(total));
+    headers.insert(HeaderName::from_static("x-spectrum-bands"), number(bands));
+    response
+}
+
+/// Band energies of a deck's song, at most [`MAX_SPECTRUM_COLUMNS`] columns
+/// from `from`: one byte per band and column (see docs/musicbot.md).
+async fn spectrum(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<SpectrumQuery>,
+) -> Result<Response, ApiError> {
+    let count = query.count.unwrap_or(MAX_SPECTRUM_COLUMNS);
+    if count == 0 || count > MAX_SPECTRUM_COLUMNS {
+        return Err(bad(format!(
+            "count must be from 1 to {MAX_SPECTRUM_COLUMNS}"
+        )));
+    }
+    let (buffer, total) = deck_buffer(&bot, &token, &query)?;
+    let from = query.from.unwrap_or(0);
+    let spectrum = buffer.spectrum();
+    let to = from.saturating_add(count);
+    let (bytes, bands) = match query.view.unwrap_or(SpectrumView::Coarse) {
+        SpectrumView::Coarse => (
+            spectrum.coarse(from, to).to_vec(),
+            crate::spectrum::COARSE_BANDS,
+        ),
+        SpectrumView::Fine => (
+            spectrum.fine(from, to).to_vec(),
+            crate::spectrum::FINE_BANDS,
+        ),
+    };
+    Ok(spectrum_response(
+        bytes,
+        from,
+        spectrum.columns(),
+        total,
+        bands,
+    ))
+}
+
+/// The whole song of a deck in [`OVERVIEW_COLUMNS`] coarse columns.
+async fn spectrum_overview(
+    State(bot): State<Arc<Bot>>,
+    Path(token): Path<String>,
+    Query(query): Query<SpectrumQuery>,
+) -> Result<Response, ApiError> {
+    let (buffer, total) = deck_buffer(&bot, &token, &query)?;
+    let spectrum = buffer.spectrum();
+    let columns = spectrum.columns();
+    let bytes = spectrum.overview(OVERVIEW_COLUMNS, total.max(columns));
+    Ok(spectrum_response(
+        bytes,
+        0,
+        columns,
+        total,
+        crate::spectrum::COARSE_BANDS,
+    ))
+}
+
 /// The longest seek a deck accepts, as the decoder's skip limit (three hours).
 const MAX_DECK_SEEK_MS: u64 = 3 * 60 * 60 * 1000;
 /// Song IDs a deck accepts from a library, in bytes.
 const MAX_DECK_SONG_ID: usize = 128;
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum LoopStep {
+    Loop,
+    Beat,
+}
+
+/// The beat loop lengths a deck offers.
+const BEAT_LOOPS: [f64; 8] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -1667,12 +1873,65 @@ enum DjControl {
     Mode {
         on: bool,
     },
-    /// A library song (`library`, `id`) or a queue entry (`entry`).
+    /// A library song, album or playlist (`library`, `id`, `kind`) or an
+    /// entry of the main queue or a deck queue (`entry`).
     Load {
         deck: usize,
         library: Option<usize>,
         id: Option<String>,
+        kind: Option<Kind>,
         entry: Option<u64>,
+    },
+    /// Adds a library song, album or playlist to a deck's queue.
+    QueueAdd {
+        deck: usize,
+        library: usize,
+        id: String,
+        kind: Option<Kind>,
+        index: Option<usize>,
+    },
+    /// Moves an entry into a deck's queue (`deck`) or the main queue (null).
+    QueueMove {
+        entry: u64,
+        deck: Option<usize>,
+        index: usize,
+    },
+    QueueRemove {
+        entry: u64,
+    },
+    QueueClear {
+        deck: usize,
+    },
+    LoopIn {
+        deck: usize,
+    },
+    LoopOut {
+        deck: usize,
+    },
+    LoopToggle {
+        deck: usize,
+    },
+    BeatLoop {
+        deck: usize,
+        beats: f64,
+    },
+    LoopResize {
+        deck: usize,
+        factor: f64,
+    },
+    LoopMove {
+        deck: usize,
+        by: LoopStep,
+        direction: i8,
+    },
+    LoopSet {
+        deck: usize,
+        start_ms: f64,
+        end_ms: f64,
+    },
+    Quantize {
+        deck: usize,
+        on: bool,
     },
     Eject {
         deck: usize,
@@ -1752,19 +2011,63 @@ impl DjControl {
                 deck,
                 library,
                 id,
+                kind,
                 entry,
             } => {
                 deck_index(*deck)?;
                 match (library, id, entry) {
-                    (Some(_), Some(id), None) => {
-                        if id.is_empty() || id.len() > MAX_DECK_SONG_ID {
-                            return Err(bad("invalid song id"));
-                        }
-                    }
-                    (None, None, Some(_)) => {}
+                    (Some(_), Some(id), None) => deck_item(id, *kind)?,
+                    (None, None, Some(_)) if kind.is_none() => {}
                     _ => return Err(bad("Name a library song or a queue entry.")),
                 }
             }
+            Self::QueueAdd { deck, id, kind, .. } => {
+                deck_index(*deck)?;
+                deck_item(id, *kind)?;
+            }
+            Self::QueueMove { deck, .. } => {
+                if let Some(deck) = deck {
+                    deck_index(*deck)?;
+                }
+            }
+            Self::QueueClear { deck }
+            | Self::LoopIn { deck }
+            | Self::LoopOut { deck }
+            | Self::LoopToggle { deck }
+            | Self::Quantize { deck, .. } => deck_index(*deck)?,
+            Self::BeatLoop { deck, beats } => {
+                deck_index(*deck)?;
+                if !BEAT_LOOPS.contains(beats) {
+                    return Err(bad("a beat loop is 1/4, 1/2, 1, 2, 4, 8, 16 or 32 beats"));
+                }
+            }
+            Self::LoopResize { deck, factor } => {
+                deck_index(*deck)?;
+                if *factor != 0.5 && *factor != 2.0 {
+                    return Err(bad("a loop halves (0.5) or doubles (2)"));
+                }
+            }
+            Self::LoopMove {
+                deck, direction, ..
+            } => {
+                deck_index(*deck)?;
+                if direction.abs() != 1 {
+                    return Err(bad("a loop moves back (-1) or forward (1)"));
+                }
+            }
+            Self::LoopSet {
+                deck,
+                start_ms,
+                end_ms,
+            } => {
+                deck_index(*deck)?;
+                for value in [start_ms, end_ms] {
+                    if !value.is_finite() || !(0.0..=MAX_DECK_SEEK_MS as f64).contains(value) {
+                        return Err(bad("loop points lie within the first three hours"));
+                    }
+                }
+            }
+            Self::QueueRemove { .. } => {}
             Self::Eject { deck }
             | Self::Play { deck, .. }
             | Self::SetCue { deck }
@@ -1819,6 +2122,33 @@ impl DjControl {
     }
 }
 
+/// A library item a deck takes: a song, album or playlist ID of 1 to
+/// [`MAX_DECK_SONG_ID`] bytes.
+fn deck_item(id: &str, kind: Option<Kind>) -> Result<(), ApiError> {
+    if !matches!(kind, None | Some(Kind::Song | Kind::Album | Kind::Playlist)) {
+        return Err(bad("a deck takes songs, albums and playlists"));
+    }
+    if id.is_empty() || id.len() > MAX_DECK_SONG_ID {
+        return Err(bad("invalid song id"));
+    }
+    Ok(())
+}
+
+/// The songs of a library song, album or playlist, in order.
+async fn deck_songs(
+    bot: &Bot,
+    library: usize,
+    id: String,
+    kind: Option<Kind>,
+) -> Result<Vec<Track>, ApiError> {
+    ask(bot, library, move |library| match kind {
+        Some(Kind::Album) => library.album(&id).map(|(_, songs)| songs),
+        Some(Kind::Playlist) => library.playlist(&id).map(|(_, songs)| songs),
+        _ => library.song(&id).map(|song| vec![song]),
+    })
+    .await
+}
+
 fn deck_index(deck: usize) -> Result<(), ApiError> {
     if deck < DECKS {
         Ok(())
@@ -1852,10 +2182,11 @@ async fn dj(
             deck,
             library: Some(library),
             id: Some(id),
+            kind,
             ..
         } => {
-            let track = ask(&bot, library, move |library| library.song(&id)).await?;
-            player.dj_load(deck, DeckSong::Library(Box::new(track), owner.name.clone()))?;
+            let tracks = deck_songs(&bot, library, id, kind).await?;
+            player.dj_load(deck, DeckSong::Library(tracks, owner.name.clone()))?;
         }
         DjControl::Load {
             deck,
@@ -1863,6 +2194,44 @@ async fn dj(
             ..
         } => player.dj_load(deck, DeckSong::Queued(entry))?,
         DjControl::Load { .. } => return Err(bad("Name a library song or a queue entry.")),
+        DjControl::QueueAdd {
+            deck,
+            library,
+            id,
+            kind,
+            index,
+        } => {
+            let tracks = deck_songs(&bot, library, id, kind).await?;
+            let added = player.dj_queue_add(deck, tracks, &owner.name, index)?;
+            tracing::info!(
+                "{} added {added} song(s) to a deck queue of {}",
+                owner.name,
+                player.name
+            );
+        }
+        DjControl::QueueMove { entry, deck, index } => player.dj_queue_move(entry, deck, index)?,
+        DjControl::QueueRemove { entry } => player.dj_queue_remove(entry)?,
+        DjControl::QueueClear { deck } => player.dj_queue_clear(deck)?,
+        DjControl::LoopIn { deck } => player.dj_loop_in(deck)?,
+        DjControl::LoopOut { deck } => player.dj_loop_out(deck)?,
+        DjControl::LoopToggle { deck } => player.dj_loop_toggle(deck)?,
+        DjControl::BeatLoop { deck, beats } => player.dj_beat_loop(deck, beats)?,
+        DjControl::LoopResize { deck, factor } => player.dj_loop_resize(deck, factor)?,
+        DjControl::LoopMove {
+            deck,
+            by,
+            direction,
+        } => player.dj_loop_move(deck, by == LoopStep::Beat, f64::from(direction))?,
+        DjControl::LoopSet {
+            deck,
+            start_ms,
+            end_ms,
+        } => player.dj_loop_set(
+            deck,
+            Duration::from_secs_f64(start_ms / 1000.0),
+            Duration::from_secs_f64(end_ms / 1000.0),
+        )?,
+        DjControl::Quantize { deck, on } => player.dj_quantize(deck, on)?,
         DjControl::Eject { deck } => player.dj_eject(deck)?,
         DjControl::Play { deck, playing } => player.dj_play(deck, playing)?,
         DjControl::Seek { deck, position_ms } => {
@@ -3086,6 +3455,7 @@ mod tests {
             state_directory: directory.path().to_owned(),
             web_assets: None,
             codec_worker: std::path::PathBuf::from("/nonexistent/nuschl-musicbot-codec-worker"),
+            preload: None,
             libraries: Arc::new(libraries),
             players: Vec::new(),
             connections: Vec::new(),
@@ -5421,7 +5791,8 @@ mod tests {
         let deck = view()["decks"][1].clone();
         assert_eq!(deck["entry"]["track"]["title"], "Library song");
         assert_eq!(deck["entry"]["added_by"], "Listener");
-        assert_eq!(deck["bpm"], 126);
+        assert_eq!(deck["bpm"], 126.0);
+        assert_eq!(deck["bpm_source"], "library");
         assert_eq!(queue_ids(&bot), ["q2", "q3"]);
         let q3 = bot.players[0].state().queue[1].id;
         let from_queue = serde_json::json!({"player":0,"control":"load","deck":0,"entry":q3});
@@ -5553,5 +5924,117 @@ mod tests {
             last = now;
         }
         mover.abort();
+    }
+
+    #[tokio::test]
+    async fn spectrum_ranges_are_bounded_and_bound_to_the_decks_song() {
+        let (_directory, mut bot, token) = dj_bot("http://unused.invalid", 0);
+        let starts = crate::preload::tests::Starts::default();
+        let pool =
+            crate::preload::Pool::new(1 << 30, starts.starter(), crate::beats::Beats::memory());
+        Arc::get_mut(&mut bot).unwrap().preload = Some(pool.clone());
+        let mut song = fixture_track("song");
+        song.duration = Some(60);
+        bot.players[0].enqueue(vec![song.clone()], "ada", None);
+        bot.players[0].set_dj(true);
+        let entry = bot.players[0].state().dj.as_ref().unwrap().decks[0]
+            .track
+            .as_ref()
+            .unwrap()
+            .entry
+            .id;
+        let query = |entry: u64, count: Option<usize>, view: SpectrumView| SpectrumQuery {
+            player: 0,
+            deck: 0,
+            entry,
+            view: Some(view),
+            from: Some(0),
+            count,
+        };
+        let status = |result: Result<Response, ApiError>| match result {
+            Ok(response) => response.status(),
+            Err(error) => error.0,
+        };
+        let ask =
+            |query: SpectrumQuery| spectrum(State(bot.clone()), Path(token.clone()), Query(query));
+        assert_eq!(
+            status(ask(query(entry, None, SpectrumView::Coarse)).await),
+            StatusCode::NOT_FOUND
+        );
+        pool.want(
+            0,
+            &[crate::preload::Want {
+                entry,
+                track: song,
+                need: crate::preload::Need::Loaded,
+            }],
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let decoder = starts.take(entry);
+        for frame in 0..100usize {
+            let samples = (0..crate::decode::FRAME)
+                .flat_map(|index| {
+                    let at = (frame * crate::decode::FRAME + index) as f32 / 48_000.0;
+                    [(std::f32::consts::TAU * 60.0 * at).sin() * 0.5; 2]
+                })
+                .collect();
+            decoder.sender.send(Ok(samples)).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.buffer(0, entry).unwrap().spectrum().columns() < 190 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let response = ask(query(entry, Some(150), SpectrumView::Coarse))
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(response.headers()["x-spectrum-total"], "6000");
+        assert_eq!(response.headers()["x-spectrum-bands"], "3");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 150 * 3);
+        // The 60 Hz tone lights the low band.
+        assert!(body[100 * 3] > body[100 * 3 + 2]);
+        let fine = ask(query(entry, Some(10), SpectrumView::Fine))
+            .await
+            .ok()
+            .unwrap();
+        let body = axum::body::to_bytes(fine.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 10 * crate::spectrum::FINE_BANDS);
+        assert_eq!(
+            status(
+                ask(query(
+                    entry,
+                    Some(MAX_SPECTRUM_COLUMNS + 1),
+                    SpectrumView::Coarse
+                ))
+                .await
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(ask(query(entry + 1, None, SpectrumView::Coarse)).await),
+            StatusCode::CONFLICT,
+            "an answer belongs to the song the deck plays"
+        );
+        let overview = spectrum_overview(
+            State(bot.clone()),
+            Path(token.clone()),
+            Query(query(entry, None, SpectrumView::Coarse)),
+        )
+        .await
+        .ok()
+        .unwrap();
+        let body = axum::body::to_bytes(overview.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), OVERVIEW_COLUMNS * 3);
+        drop(decoder);
     }
 }

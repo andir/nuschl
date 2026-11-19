@@ -176,6 +176,8 @@ pub struct State {
     pub next_history_id: u64,
     /// DJ mode, while it is on.
     pub dj: Option<Dj>,
+    /// DJ mode's queue per deck, kept while DJ mode is off.
+    pub deck_queues: [VecDeque<Entry>; DECKS],
 }
 
 impl State {
@@ -288,6 +290,7 @@ pub struct Restored {
     pub ducking: Ducking,
     pub current: Option<RestoredCurrent>,
     pub queue: Vec<Entry>,
+    pub deck_queues: [Vec<Entry>; DECKS],
     pub next_id: u64,
     pub history: VecDeque<HistoryItem>,
     pub next_history_id: u64,
@@ -498,6 +501,7 @@ impl Player {
                 history: VecDeque::new(),
                 next_history_id: 1,
                 dj: None,
+                deck_queues: [VecDeque::new(), VecDeque::new()],
             }),
             wake: Notify::new(),
             // About a second; a slower connection skips ahead.
@@ -700,9 +704,13 @@ impl Player {
                 }
             });
             state.queue = restored.queue.into_iter().take(MAX_QUEUE).collect();
+            state.deck_queues = restored
+                .deck_queues
+                .map(|queue| queue.into_iter().take(MAX_QUEUE).collect());
             let largest = state
                 .queue
                 .iter()
+                .chain(state.deck_queues.iter().flatten())
                 .map(|entry| entry.id)
                 .chain(state.current.iter().map(|playing| playing.entry.id))
                 .max()
@@ -815,11 +823,13 @@ impl Player {
     }
 
     /// Plays the queue for as long as the program runs.
+    /// `preload` is the bot's preload pool and this player's index in it.
     pub async fn run(
         self: Arc<Self>,
         libraries: Arc<Vec<Library>>,
         configured_bitrate: u32,
         codec_worker: PathBuf,
+        preload: Option<(Arc<crate::preload::Pool>, usize)>,
     ) {
         let output = Output::new(
             Client::new(Role::Encode, codec_worker.clone()),
@@ -829,7 +839,7 @@ impl Player {
             let libraries = libraries.clone();
             move |track, start| decode::start(libraries.clone(), codec_worker.clone(), track, start)
         };
-        self.play(libraries, configured_bitrate, output, start)
+        self.play(libraries, configured_bitrate, output, start, preload)
             .await
     }
 
@@ -840,6 +850,7 @@ impl Player {
         configured_bitrate: u32,
         mut out: Output,
         mut start: impl FnMut(Track, decode::Start) -> Decoding,
+        preload: Option<(Arc<crate::preload::Pool>, usize)>,
     ) {
         // At most one raw frame survives an asynchronous encode. A pause or
         // temporarily absent listener cannot consume it without advancing time.
@@ -855,8 +866,8 @@ impl Player {
                     configured_bitrate,
                     &libraries,
                     &mut start,
-                    decoding.take(),
-                    held.take(),
+                    (decoding.take(), held.take()),
+                    preload.clone(),
                 )
                 .await;
                 underrun = 0;
@@ -1669,6 +1680,7 @@ mod tests {
                 played_ms: 80,
             }),
             queue: Vec::new(),
+            deck_queues: Default::default(),
             next_id: 42,
             history: VecDeque::new(),
             next_history_id: 1,
@@ -1882,6 +1894,7 @@ mod tests {
                 played_ms: 0,
             }),
             queue: Vec::new(),
+            deck_queues: Default::default(),
             next_id: 2,
             history: VecDeque::new(),
             next_history_id: 1,

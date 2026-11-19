@@ -472,6 +472,7 @@ mod tests {
                 played_ms,
             }),
             queue: Vec::new(),
+            deck_queues: Default::default(),
             next_id: entry + 1,
             history,
             next_history_id,

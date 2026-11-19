@@ -265,9 +265,14 @@ impl Resampler {
     /// Starts over with input that begins at sample `start` and output that
     /// begins at `position` (at or after `start`).
     pub fn reset(&mut self, start: u64, position: u64) {
+        self.reset_at(start, position as f64);
+    }
+
+    /// [`Resampler::reset`] to a position between samples, as a loop's start.
+    pub fn reset_at(&mut self, start: u64, position: f64) {
         self.samples.clear();
         self.start = start;
-        self.position = position.max(start) as f64;
+        self.position = position.max(start as f64);
         self.ended = false;
     }
 
@@ -306,7 +311,6 @@ impl Resampler {
     }
 
     /// Every input sample has been played.
-    #[cfg(test)]
     pub fn drained(&self) -> bool {
         self.ended && self.position >= self.input_end() as f64
     }
@@ -333,9 +337,28 @@ impl Resampler {
 
     /// Writes one frame, the speed moving linearly from ratio `from` to `to`.
     pub fn render(&mut self, from: f64, to: f64, frame: &mut [f32]) {
-        let count = frame.len() / CHANNELS;
-        for (index, out) in frame.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
-            let ratio = from + (to - from) * (index + 1) as f64 / count as f64;
+        let total = frame.len() / CHANNELS;
+        self.render_part(from, to, total, 0, frame, None);
+    }
+
+    /// Writes samples `first..` of a frame of `total` samples into `out`, the
+    /// speed moving linearly from `from` to `to` across the whole frame, and
+    /// stops once the position reaches `limit`; returns the samples written.
+    pub fn render_part(
+        &mut self,
+        from: f64,
+        to: f64,
+        total: usize,
+        first: usize,
+        out: &mut [f32],
+        limit: Option<f64>,
+    ) -> usize {
+        let mut written = 0;
+        for (offset, out) in out.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
+            if limit.is_some_and(|limit| self.position >= limit) {
+                break;
+            }
+            let ratio = from + (to - from) * (first + offset + 1) as f64 / total.max(1) as f64;
             let whole = self.position.floor();
             let t = (self.position - whole) as f32;
             let at = whole as i64;
@@ -357,6 +380,7 @@ impl Resampler {
                                 + t * (3.0 * (x0 - x1) + x2 - xm1)));
             }
             self.position += ratio;
+            written += 1;
         }
         // Keep one sample before the position for the next interpolation.
         let keep_from = (self.position.floor() as u64).saturating_sub(1);
@@ -367,6 +391,7 @@ impl Resampler {
         if self.samples.is_empty() {
             self.start = self.start.max(keep_from);
         }
+        written
     }
 }
 

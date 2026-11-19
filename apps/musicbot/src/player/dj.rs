@@ -9,8 +9,12 @@ use super::{
     dsp::{self, Curve, Limiter, Ramp, Resampler, Tone, ToneFilter},
     next_gain, target_gain, wall_clock_ms,
 };
-use crate::subsonic::{Library, Track};
-use std::{fmt, time::Duration};
+use crate::{
+    preload::{Buffer, Fill, Need, Pool, Read, Want},
+    subsonic::{Library, Track},
+};
+use std::sync::Arc;
+use std::{collections::VecDeque, fmt, time::Duration};
 use tokio::{
     sync::mpsc::error::TryRecvError,
     time::{Instant, sleep, sleep_until},
@@ -26,6 +30,11 @@ const FRAME_SAMPLES: u64 = FRAME as u64;
 const SAMPLES_PER_MS: u64 = 48;
 /// A deck sounds in the room at this gain in the mix or more (−20 dB).
 const AUDIBLE: f32 = 0.1;
+/// The longest free loop and the shortest one, in samples.
+const MAX_LOOP_SAMPLES: f64 = 60.0 * 48_000.0;
+const MIN_FREE_LOOP_SAMPLES: f64 = 480.0;
+/// A loop's end crossfades into its start over this many samples (5 ms).
+const LOOP_FADE: usize = 240;
 /// Songs in a row that fail to decode before auto load stops.
 const MAX_FAILURES: u32 = 3;
 /// The pause before a deck's next decoder after a failure; it doubles with
@@ -57,12 +66,61 @@ pub struct Deck {
     pub range: u8,
     /// Why this deck's last song stopped early.
     pub error: Option<String>,
-    /// The song came from the queue and returns there unheard.
-    queued: bool,
+    /// The queue the song came from; it returns there unheard.
+    origin: Origin,
     /// Load the queue's next song once this deck has faded out.
     reload: bool,
     /// After a failure, this deck's next decoder starts at this time.
     restart_at: Option<Instant>,
+    /// Samples of the song decoded in memory, or None while the deck streams.
+    pub loaded: Option<u64>,
+    /// The whole song is in memory.
+    pub preloaded: bool,
+    /// The deck plays its song from memory, so it can loop.
+    pub memory: bool,
+    /// The song's BPM estimated from its audio, used without a library BPM.
+    pub estimate: Option<f32>,
+    /// The BPM estimate or the beat grid is being computed.
+    pub analysing: bool,
+    /// Where the song's beats fall, when known.
+    pub grid: Option<BeatGrid>,
+    pub looping: Option<Loop>,
+    /// Loop points snap to beats when the grid is known.
+    pub quantize: bool,
+}
+
+/// A song's beats at a constant tempo: `first + k · 60 / bpm` seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BeatGrid {
+    pub bpm: f64,
+    /// The first beat, in samples.
+    pub first: f64,
+}
+
+impl BeatGrid {
+    /// Samples per beat.
+    pub fn period(&self) -> f64 {
+        48_000.0 * 60.0 / self.bpm
+    }
+
+    /// The beat nearest to `position`.
+    pub fn nearest(&self, position: f64) -> f64 {
+        self.first + ((position - self.first) / self.period()).round() * self.period()
+    }
+
+    /// The beat at or before `position`.
+    pub fn floor(&self, position: f64) -> f64 {
+        self.first + ((position - self.first) / self.period()).floor() * self.period()
+    }
+}
+
+/// A loop in song time, in samples.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Loop {
+    pub start: f64,
+    /// Unset between loop in and loop out.
+    pub end: Option<f64>,
+    pub active: bool,
 }
 
 impl Default for Deck {
@@ -78,9 +136,17 @@ impl Default for Deck {
             tempo: 0.0,
             range: TEMPO_RANGES[0],
             error: None,
-            queued: false,
+            origin: Origin::Library,
             reload: false,
             restart_at: None,
+            loaded: None,
+            preloaded: false,
+            memory: false,
+            estimate: None,
+            analysing: false,
+            grid: None,
+            looping: None,
+            quantize: true,
         }
     }
 }
@@ -91,14 +157,79 @@ impl Deck {
         1.0 + f64::from(self.tempo)
     }
 
-    /// The song's BPM from the library, before the tempo fader.
-    pub fn base_bpm(&self) -> Option<u32> {
-        self.track.as_ref()?.entry.track.bpm
+    /// The song's BPM before the tempo fader: the library's, else the estimate.
+    pub fn base_bpm(&self) -> Option<f64> {
+        let playing = self.track.as_ref()?;
+        playing
+            .entry
+            .track
+            .bpm
+            .map(f64::from)
+            .or(self.estimate.map(f64::from))
+    }
+
+    /// Whether the BPM comes from the library (true) or the estimate (false).
+    pub fn bpm_from_library(&self) -> Option<bool> {
+        let playing = self.track.as_ref()?;
+        if playing.entry.track.bpm.is_some() {
+            Some(true)
+        } else {
+            self.estimate.map(|_| false)
+        }
+    }
+
+    /// The loop playing now: start and end in samples.
+    fn active_loop(&self) -> Option<(f64, f64)> {
+        let looping = self.looping?;
+        looping
+            .end
+            .filter(|_| looping.active)
+            .map(|end| (looping.start, end))
+    }
+
+    /// Samples per beat: from the grid, else from the BPM.
+    fn beat(&self) -> Option<f64> {
+        self.grid
+            .map(|grid| grid.period())
+            .or_else(|| self.base_bpm().map(|bpm| 48_000.0 * 60.0 / bpm))
+    }
+
+    /// `position` on the nearest beat when quantising with a known grid.
+    fn snap(&self, position: f64) -> f64 {
+        match self.grid {
+            Some(grid) if self.quantize => grid.nearest(position),
+            _ => position,
+        }
+    }
+
+    /// The song's length in samples, when known.
+    fn length(&self) -> f64 {
+        self.track
+            .as_ref()
+            .and_then(|playing| playing.entry.track.duration)
+            .map_or(f64::MAX, |seconds| f64::from(seconds) * 48_000.0)
+    }
+
+    /// The shortest and longest loop: a quarter beat to 64 beats with a known
+    /// beat, else 10 ms to 60 s.
+    fn loop_bounds(&self) -> (f64, f64) {
+        match self.beat() {
+            Some(beat) => (beat / 4.0, (beat * 64.0).min(MAX_LOOP_SAMPLES * 2.0)),
+            None => (MIN_FREE_LOOP_SAMPLES, MAX_LOOP_SAMPLES),
+        }
+    }
+
+    /// A loop from `start` to `end`, kept within the bounds and the song.
+    fn bounded_loop(&self, start: f64, end: f64) -> (f64, f64) {
+        let (shortest, longest) = self.loop_bounds();
+        let length = (end - start).clamp(shortest, longest);
+        let start = start.clamp(0.0, (self.length() - length).max(0.0));
+        (start, start + length)
     }
 
     /// The BPM at the current tempo.
     pub fn bpm(&self) -> Option<f64> {
-        self.base_bpm().map(|bpm| f64::from(bpm) * self.ratio())
+        self.base_bpm().map(|bpm| bpm * self.ratio())
     }
 
     pub fn position_ms(&self) -> u64 {
@@ -128,7 +259,6 @@ impl Deck {
         self.position = position.min(length);
         track.frames = self.position / FRAME_SAMPLES;
         track.generation += 1;
-        track.buffering = true;
         Ok(())
     }
 
@@ -138,7 +268,14 @@ impl Deck {
         self.position = 0;
         self.cue = 0;
         self.reload = false;
-        self.queued = false;
+        self.origin = Origin::Library;
+        self.loaded = None;
+        self.preloaded = false;
+        self.memory = false;
+        self.estimate = None;
+        self.analysing = false;
+        self.grid = None;
+        self.looping = None;
         self.track.take()
     }
 }
@@ -257,6 +394,9 @@ pub enum DjError {
     NoBpm,
     OutOfRange,
     NothingToFadeTo,
+    QueueFull,
+    NoLoop,
+    Streaming,
 }
 
 impl fmt::Display for DjError {
@@ -268,11 +408,59 @@ impl fmt::Display for DjError {
             Self::NoBpm => "Sync needs the BPM of both songs.",
             Self::OutOfRange => "The other deck's BPM is beyond this deck's tempo range.",
             Self::NothingToFadeTo => "Load a song into the other deck first.",
+            Self::QueueFull => "That queue is full.",
+            Self::NoLoop => "Set a loop first.",
+            Self::Streaming => "Loops play from memory; this song plays from the library.",
         })
     }
 }
 
+/// Where a deck's song came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Library,
+    /// The main queue.
+    Main,
+    /// A deck's queue.
+    Deck(usize),
+}
+
 impl State {
+    /// The queue `origin` names: a deck's queue, or the main queue.
+    fn queue_mut(&mut self, deck: Option<usize>) -> &mut VecDeque<Entry> {
+        match deck {
+            Some(deck) => &mut self.deck_queues[deck.min(DECKS - 1)],
+            None => &mut self.queue,
+        }
+    }
+
+    /// New queue entries for `tracks`, each with its own ID.
+    fn entries(&mut self, tracks: Vec<Track>, added_by: &str) -> Vec<Entry> {
+        tracks
+            .into_iter()
+            .map(|track| {
+                let id = self.next_id;
+                self.next_id += 1;
+                Entry {
+                    id,
+                    track,
+                    added_by: added_by.to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    /// Takes the entry `id` out of whichever queue holds it.
+    fn take_entry(&mut self, id: u64) -> Option<(Entry, Option<usize>)> {
+        for queue in [None, Some(0), Some(1)] {
+            let list = self.queue_mut(queue);
+            if let Some(position) = list.iter().position(|entry| entry.id == id) {
+                return list.remove(position).map(|entry| (entry, queue));
+            }
+        }
+        None
+    }
+
     /// Turns DJ mode on: the current song continues on deck A where it is,
     /// and with auto load the queue's next songs wait on the empty decks.
     fn enter_dj(&mut self, now: fn() -> i64) -> bool {
@@ -328,7 +516,7 @@ impl State {
     }
 
     /// Empties `deck`; its play ends with `outcome`. A queue song the room
-    /// has not heard yet goes back to the front of the queue.
+    /// has not heard yet goes back to the front of the queue it came from.
     fn clear_deck(
         &mut self,
         deck: usize,
@@ -339,37 +527,54 @@ impl State {
         let Some(dj) = self.dj.as_mut() else {
             return;
         };
-        let queued = dj.decks[deck].queued;
+        let origin = dj.decks[deck].origin;
         let Some(playing) = dj.decks[deck].eject() else {
             return;
         };
-        if queued
+        let back = match origin {
+            Origin::Library => None,
+            Origin::Main => Some(None),
+            Origin::Deck(queue) => Some(Some(queue)),
+        };
+        if let Some(queue) = back
             && outcome == HistoryOutcome::Skipped
             && playing.started_at_ms.is_none()
-            && self.queue.len() < MAX_QUEUE
+            && self.queue_mut(queue).len() < MAX_QUEUE
         {
-            self.queue.push_front(playing.entry);
+            self.queue_mut(queue).push_front(playing.entry);
         } else {
             self.finish_play(playing, outcome, error, now);
         }
     }
 
     /// Puts `entry` on `deck`, paused at its start.
-    fn put_on_deck(&mut self, deck: usize, entry: Entry, queued: bool, now: fn() -> i64) {
+    fn put_on_deck(&mut self, deck: usize, entry: Entry, origin: Origin, now: fn() -> i64) {
         self.clear_deck(deck, HistoryOutcome::Skipped, None, now);
         if let Some(dj) = self.dj.as_mut() {
             let deck = &mut dj.decks[deck];
             deck.track = Some(Playing::new(entry));
-            deck.queued = queued;
+            deck.origin = origin;
         }
     }
 
-    /// Loads the queue's next song onto `deck`.
+    /// The song `deck` loads next: the first of its own queue, else the
+    /// main queue's first.
+    fn next_for(&self, deck: usize) -> Option<&Entry> {
+        self.deck_queues[deck]
+            .front()
+            .or_else(|| self.queue.front())
+    }
+
+    /// Loads the next song (see [`State::next_for`]) onto `deck`.
     fn load_next(&mut self, deck: usize, now: fn() -> i64) -> bool {
-        let Some(entry) = self.queue.pop_front() else {
-            return false;
+        let (entry, origin) = match self.deck_queues[deck].pop_front() {
+            Some(entry) => (entry, Origin::Deck(deck)),
+            None => match self.queue.pop_front() {
+                Some(entry) => (entry, Origin::Main),
+                None => return false,
+            },
         };
-        self.put_on_deck(deck, entry, true, now);
+        self.put_on_deck(deck, entry, origin, now);
         true
     }
 
@@ -424,9 +629,11 @@ impl State {
 
 /// Where a deck's song comes from.
 pub enum DeckSong {
-    /// A song from a library, added by this person.
-    Library(Box<Track>, String),
-    /// The queue entry with this ID, which leaves the queue.
+    /// Songs from a library, added by this person: the first goes onto the
+    /// deck, the rest to the front of the deck's queue.
+    Library(Vec<Track>, String),
+    /// The entry with this ID in the main queue or a deck queue, which
+    /// leaves its queue.
     Queued(u64),
 }
 
@@ -472,30 +679,93 @@ impl Player {
         let deck = deck.min(DECKS - 1);
         self.dj(|state| {
             match song {
-                DeckSong::Library(track, added_by) => {
-                    let id = state.next_id;
-                    state.next_id += 1;
-                    let entry = Entry {
-                        id,
-                        track: *track,
-                        added_by,
-                    };
-                    state.put_on_deck(deck, entry, false, wall_clock_ms);
+                DeckSong::Library(tracks, added_by) => {
+                    let mut entries = state.entries(tracks, &added_by);
+                    if entries.is_empty() {
+                        return Err(DjError::Empty);
+                    }
+                    let first = entries.remove(0);
+                    let queue = &mut state.deck_queues[deck];
+                    let room = MAX_QUEUE.saturating_sub(queue.len());
+                    for entry in entries.into_iter().take(room).rev() {
+                        queue.push_front(entry);
+                    }
+                    state.put_on_deck(deck, first, Origin::Library, wall_clock_ms);
                 }
                 DeckSong::Queued(id) => {
-                    let position = state
-                        .queue
-                        .iter()
-                        .position(|entry| entry.id == id)
-                        .ok_or(DjError::NotQueued)?;
-                    let entry = state.queue.remove(position).unwrap();
-                    state.put_on_deck(deck, entry, true, wall_clock_ms);
+                    let (entry, queue) = state.take_entry(id).ok_or(DjError::NotQueued)?;
+                    let origin = queue.map_or(Origin::Main, Origin::Deck);
+                    state.put_on_deck(deck, entry, origin, wall_clock_ms);
                 }
             }
             if let Some(dj) = state.dj.as_mut() {
                 dj.decks[deck].error = None;
             }
             self.cues[deck].reset();
+            Ok(())
+        })
+    }
+
+    /// Adds songs to `deck`'s queue at `index` (clamped; `None`: at the end);
+    /// returns how many fit.
+    pub fn dj_queue_add(
+        &self,
+        deck: usize,
+        tracks: Vec<Track>,
+        added_by: &str,
+        index: Option<usize>,
+    ) -> Result<usize, DjError> {
+        let deck = deck.min(DECKS - 1);
+        self.dj(|state| {
+            let room = MAX_QUEUE.saturating_sub(state.deck_queues[deck].len());
+            let entries = state.entries(tracks.into_iter().take(room).collect(), added_by);
+            let queue = &mut state.deck_queues[deck];
+            let first = index.unwrap_or(usize::MAX).min(queue.len());
+            let added = entries.len();
+            for (at, entry) in (first..).zip(entries) {
+                queue.insert(at, entry);
+            }
+            Ok(added)
+        })
+    }
+
+    /// Moves the entry `entry` from any queue into `deck`'s queue (`None`: the
+    /// main queue) at `index` of that queue without the entry (clamped).
+    pub fn dj_queue_move(
+        &self,
+        entry: u64,
+        deck: Option<usize>,
+        index: usize,
+    ) -> Result<(), DjError> {
+        self.dj(|state| {
+            let deck = deck.map(|deck| deck.min(DECKS - 1));
+            let from = [None, Some(0), Some(1)]
+                .into_iter()
+                .find(|queue| state.queue_mut(*queue).iter().any(|item| item.id == entry))
+                .ok_or(DjError::NotQueued)?;
+            if from != deck && state.queue_mut(deck).len() >= MAX_QUEUE {
+                return Err(DjError::QueueFull);
+            }
+            let (moved, _) = state.take_entry(entry).ok_or(DjError::NotQueued)?;
+            let target = state.queue_mut(deck);
+            let index = index.min(target.len());
+            target.insert(index, moved);
+            Ok(())
+        })
+    }
+
+    pub fn dj_queue_remove(&self, entry: u64) -> Result<(), DjError> {
+        self.dj(|state| {
+            state
+                .take_entry(entry)
+                .map(|_| ())
+                .ok_or(DjError::NotQueued)
+        })
+    }
+
+    pub fn dj_queue_clear(&self, deck: usize) -> Result<(), DjError> {
+        self.dj(|state| {
+            state.deck_queues[deck.min(DECKS - 1)].clear();
             Ok(())
         })
     }
@@ -527,11 +797,178 @@ impl Player {
         self.seek_deck(deck, |_| samples)
     }
 
+    /// Moves the deck to a position; a seek outside the playing loop ends it.
     fn seek_deck(&self, deck: usize, position: impl FnOnce(&Deck) -> u64) -> Result<(), DjError> {
         let index = deck.min(DECKS - 1);
-        self.deck(index, |deck| deck.seek_to(position(deck)))?;
+        self.deck(index, |deck| {
+            let target = position(deck);
+            if let Some((start, end)) = deck.active_loop()
+                && !(start..end).contains(&(target as f64))
+                && let Some(looping) = deck.looping.as_mut()
+            {
+                looping.active = false;
+            }
+            deck.seek_to(target)
+        })?;
         self.cues[index].reset();
         Ok(())
+    }
+
+    /// A loop change on `deck`; Err for songs that stream, which cannot loop.
+    fn loop_change(
+        &self,
+        deck: usize,
+        change: impl FnOnce(&mut Deck) -> Result<Option<u64>, DjError>,
+    ) -> Result<(), DjError> {
+        let index = deck.min(DECKS - 1);
+        let seek = self.deck(index, |deck| {
+            if deck.track.is_none() {
+                return Err(DjError::Empty);
+            }
+            if !deck.memory {
+                return Err(DjError::Streaming);
+            }
+            change(deck)
+        })?;
+        if let Some(position) = seek {
+            self.seek_deck(index, |_| position)?;
+        }
+        Ok(())
+    }
+
+    /// Loop in: the loop starts at the position (on the nearest beat when
+    /// quantising); loop out sets its end.
+    pub fn dj_loop_in(&self, deck: usize) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let start = deck.snap(deck.position as f64).max(0.0);
+            deck.looping = Some(Loop {
+                start,
+                end: None,
+                active: false,
+            });
+            Ok(None)
+        })
+    }
+
+    /// Loop out: the loop ends at the position and plays.
+    pub fn dj_loop_out(&self, deck: usize) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let looping = deck.looping.ok_or(DjError::NoLoop)?;
+            let mut end = deck.snap(deck.position as f64);
+            if end <= looping.start {
+                end = looping.start + deck.beat().unwrap_or(MIN_FREE_LOOP_SAMPLES);
+            }
+            let (start, end) = deck.bounded_loop(looping.start, end);
+            deck.looping = Some(Loop {
+                start,
+                end: Some(end),
+                active: true,
+            });
+            Ok(None)
+        })
+    }
+
+    /// Turns the loop off, or plays the last loop again from its start
+    /// unless the deck already is inside it.
+    pub fn dj_loop_toggle(&self, deck: usize) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let position = deck.position as f64;
+            let looping = deck.looping.as_mut().ok_or(DjError::NoLoop)?;
+            let end = looping.end.ok_or(DjError::NoLoop)?;
+            looping.active = !looping.active;
+            let inside = (looping.start..end).contains(&position);
+            Ok((looping.active && !inside).then_some(looping.start as u64))
+        })
+    }
+
+    /// A loop of `beats` from the current beat (the beat at or before the
+    /// position when quantising with a known grid).
+    pub fn dj_beat_loop(&self, deck: usize, beats: f64) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let beat = deck.beat().ok_or(DjError::NoBpm)?;
+            let position = deck.position as f64;
+            let start = match deck.grid {
+                Some(grid) if deck.quantize => grid.floor(position),
+                _ => position,
+            };
+            let (start, end) = deck.bounded_loop(start.max(0.0), start.max(0.0) + beat * beats);
+            deck.looping = Some(Loop {
+                start,
+                end: Some(end),
+                active: true,
+            });
+            Ok(None)
+        })
+    }
+
+    /// Halves (0.5) or doubles (2) the loop, keeping its start.
+    pub fn dj_loop_resize(&self, deck: usize, factor: f64) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let looping = deck.looping.ok_or(DjError::NoLoop)?;
+            let end = looping.end.ok_or(DjError::NoLoop)?;
+            let (start, end) = deck.bounded_loop(
+                looping.start,
+                looping.start + (end - looping.start) * factor,
+            );
+            deck.looping = Some(Loop {
+                start,
+                end: Some(end),
+                ..looping
+            });
+            Ok(None)
+        })
+    }
+
+    /// Moves the loop by its length or by one beat; a deck playing inside it
+    /// moves along.
+    pub fn dj_loop_move(&self, deck: usize, by_beat: bool, direction: f64) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let looping = deck.looping.ok_or(DjError::NoLoop)?;
+            let end = looping.end.ok_or(DjError::NoLoop)?;
+            let step = if by_beat {
+                deck.beat().ok_or(DjError::NoBpm)?
+            } else {
+                end - looping.start
+            };
+            let length = end - looping.start;
+            let start = (looping.start + step * direction.signum())
+                .clamp(0.0, (deck.length() - length).max(0.0));
+            let shift = start - looping.start;
+            deck.looping = Some(Loop {
+                start,
+                end: Some(start + length),
+                ..looping
+            });
+            let position = deck.position as f64;
+            let inside = looping.active && (looping.start..end).contains(&position);
+            Ok(inside.then(|| (position + shift).max(0.0) as u64))
+        })
+    }
+
+    /// Sets both loop points (dragged handles), on beats when quantising.
+    pub fn dj_loop_set(&self, deck: usize, start: Duration, end: Duration) -> Result<(), DjError> {
+        self.loop_change(deck, |deck| {
+            let at = |time: Duration| deck.snap(time.as_secs_f64() * 48_000.0);
+            let (start, mut end) = (at(start), at(end));
+            if end <= start {
+                end = start + deck.beat().unwrap_or(MIN_FREE_LOOP_SAMPLES);
+            }
+            let (start, end) = deck.bounded_loop(start, end);
+            let active = deck.looping.is_some_and(|looping| looping.active);
+            deck.looping = Some(Loop {
+                start,
+                end: Some(end),
+                active,
+            });
+            Ok(None)
+        })
+    }
+
+    pub fn dj_quantize(&self, deck: usize, on: bool) -> Result<(), DjError> {
+        self.deck(deck, |deck| {
+            deck.quantize = on;
+            Ok(())
+        })
     }
 
     /// Sets the cue point at the deck's position.
@@ -602,7 +1039,7 @@ impl Player {
             let target = dj.decks[1 - deck].bpm().ok_or(DjError::NoBpm)?;
             let own = &mut dj.decks[deck];
             let base = own.base_bpm().ok_or(DjError::NoBpm)?;
-            let tempo = (target / f64::from(base) - 1.0) as f32;
+            let tempo = (target / base - 1.0) as f32;
             let widest = f32::from(TEMPO_RANGES[1]) / 100.0;
             if tempo.abs() > widest + 1e-6 {
                 return Err(DjError::OutOfRange);
@@ -687,6 +1124,30 @@ impl Source for Decoding {
     }
 }
 
+/// Reads a song's PCM from memory, from sample `next` on.
+struct BufferReader {
+    buffer: Arc<Buffer>,
+    next: u64,
+    /// The song and seek it reads for.
+    play: (u64, u64),
+}
+
+impl Source for BufferReader {
+    fn pull(&mut self) -> Pull {
+        match self.buffer.read(self.next, FRAME) {
+            Read::Samples(samples) => {
+                self.next += (samples.len() / CHANNELS) as u64;
+                Pull::Frame(samples)
+            }
+            // Past the decoded part: wait for decoding, or for the deck to
+            // switch to its decoder (Overflow).
+            Read::Wait | Read::Overflow => Pull::Empty,
+            Read::End => Pull::End,
+            Read::Failed(error) => Pull::Failed(error),
+        }
+    }
+}
+
 /// How a deck took part in a frame.
 #[derive(Debug, PartialEq)]
 enum Rendered {
@@ -716,6 +1177,18 @@ struct DeckEngine {
     bound: Option<(u64, u64)>,
     /// The deck's output before its channel fader, reused every frame.
     cue: Vec<f32>,
+    /// What played past a loop's end, fading out as the loop's start fades in.
+    tail: Option<Tail>,
+}
+
+/// The continuation past a loop's end during the loop crossfade.
+struct Tail {
+    resampler: Resampler,
+    reader: BufferReader,
+    /// Crossfade samples done.
+    done: usize,
+    /// Where in the current frame the loop started again.
+    offset: usize,
 }
 
 impl Default for DeckEngine {
@@ -728,6 +1201,7 @@ impl Default for DeckEngine {
             fader: Ramp::default(),
             bound: None,
             cue: vec![0.0; FRAME * CHANNELS],
+            tail: None,
         }
     }
 }
@@ -741,6 +1215,7 @@ impl DeckEngine {
         self.play = 0.0;
         self.ratio = ratio;
         self.bound = Some(play);
+        self.tail = None;
     }
 
     fn silent(&self) -> bool {
@@ -752,7 +1227,7 @@ impl DeckEngine {
         self.bound.is_some() && self.resampler.unplayed()
     }
 
-    fn render(&mut self, deck: &Deck, gain: f32, source: Option<&mut dyn Source>) -> Rendered {
+    fn render(&mut self, deck: &Deck, gain: f32, mut feed: Feed<'_>) -> Rendered {
         let current = deck
             .track
             .as_ref()
@@ -776,6 +1251,7 @@ impl DeckEngine {
             dsp::scale(&mut self.cue, self.play, 0.0);
             self.play = 0.0;
             self.bound = None;
+            self.tail = None;
             let (from, to) = self.fader.step(gain);
             return Rendered::Audio {
                 from,
@@ -795,23 +1271,55 @@ impl DeckEngine {
                 next
             }
         };
-        let mut source = source;
-        // Pull one frame ahead, so a deck that moves away can still fade out.
-        while !self.resampler.ready_ahead(from, to) {
-            let pulled = match source.as_deref_mut() {
-                Some(source) => source.pull(),
-                None => Pull::Empty,
-            };
-            match pulled {
-                Pull::Frame(frame) => self.resampler.push(&frame),
-                Pull::Empty if self.resampler.ready(from, to) => break,
-                Pull::Empty => return Rendered::Starved,
-                Pull::End => self.resampler.end(),
-                Pull::Failed(error) => return Rendered::Failed(error),
-            }
+        if let Err(rendered) = fill(&mut self.resampler, &mut feed, from, to) {
+            return rendered;
         }
         self.ratio = to;
-        self.resampler.render(from, to, &mut self.cue);
+        // Loops play from memory only.
+        let looping = deck
+            .active_loop()
+            .filter(|_| matches!(feed, Feed::Memory(_)));
+        let mut written = 0;
+        for _ in 0..16 {
+            written += self.resampler.render_part(
+                from,
+                to,
+                FRAME,
+                written,
+                &mut self.cue[written * CHANNELS..],
+                looping.map(|(_, end)| end),
+            );
+            let (Some((start, end)), Feed::Memory(reader)) = (looping, &mut feed) else {
+                break;
+            };
+            if self.resampler.position() < end {
+                break;
+            }
+            // Wrap to the loop's start; the audio past its end fades out.
+            self.tail = Some(Tail {
+                resampler: self.resampler.clone(),
+                reader: BufferReader {
+                    buffer: reader.buffer.clone(),
+                    next: reader.next,
+                    play: reader.play,
+                },
+                done: 0,
+                offset: written,
+            });
+            let overshoot = self.resampler.position() - end;
+            let restart = if (0.0..end - start).contains(&overshoot) {
+                start + overshoot
+            } else {
+                start
+            };
+            let first = (restart.floor() as u64).saturating_sub(1);
+            self.resampler.reset_at(first, restart);
+            reader.next = first;
+            if fill(&mut self.resampler, &mut feed, from, to).is_err() || written >= FRAME {
+                break;
+            }
+        }
+        self.crossfade_tail(from, to);
         self.tone.process(&mut self.cue, deck.tone());
         let play = if deck.playing { 1.0 } else { 0.0 };
         dsp::scale(&mut self.cue, self.play, play);
@@ -821,6 +1329,80 @@ impl DeckEngine {
             from,
             to,
             fading: false,
+        }
+    }
+}
+
+/// What feeds a deck: its song in memory, its decoder, or nothing yet.
+enum Feed<'a> {
+    Memory(&'a mut BufferReader),
+    Stream(&'a mut Decoding),
+    Nothing,
+}
+
+impl Feed<'_> {
+    fn pull(&mut self) -> Pull {
+        match self {
+            Self::Memory(reader) => reader.pull(),
+            Self::Stream(decoding) => decoding.pull(),
+            Self::Nothing => Pull::Empty,
+        }
+    }
+}
+
+/// Pulls input until a frame at ratios `from` to `to` (and one frame more,
+/// so a deck that moves away can still fade out) is there; Err when the
+/// deck starves or its song fails.
+fn fill(
+    resampler: &mut Resampler,
+    feed: &mut Feed<'_>,
+    from: f64,
+    to: f64,
+) -> Result<(), Rendered> {
+    while !resampler.ready_ahead(from, to) {
+        match feed.pull() {
+            Pull::Frame(frame) => resampler.push(&frame),
+            Pull::Empty if resampler.ready(from, to) => break,
+            Pull::Empty => return Err(Rendered::Starved),
+            Pull::End => resampler.end(),
+            Pull::Failed(error) => return Err(Rendered::Failed(error)),
+        }
+    }
+    Ok(())
+}
+
+impl DeckEngine {
+    /// Mixes what played past a loop's end into the loop's start with an
+    /// equal-power crossfade over [`LOOP_FADE`] samples.
+    fn crossfade_tail(&mut self, from: f64, to: f64) {
+        let Some(tail) = self.tail.as_mut() else {
+            return;
+        };
+        let count = (LOOP_FADE - tail.done).min(FRAME - tail.offset);
+        let mut feed = Feed::Memory(&mut tail.reader);
+        // Missing input past the decoded part reads as silence.
+        let _ = fill(&mut tail.resampler, &mut feed, from, to);
+        let mut old = vec![0.0; count * CHANNELS];
+        tail.resampler
+            .render_part(from, to, FRAME, tail.offset, &mut old, None);
+        let new = &mut self.cue[tail.offset * CHANNELS..(tail.offset + count) * CHANNELS];
+        for (index, (new, old)) in new
+            .as_chunks_mut::<CHANNELS>()
+            .0
+            .iter_mut()
+            .zip(old.as_chunks::<CHANNELS>().0)
+            .enumerate()
+        {
+            let share = (tail.done + index + 1) as f32 / LOOP_FADE as f32;
+            let angle = share * std::f32::consts::FRAC_PI_2;
+            for (new, old) in new.iter_mut().zip(old) {
+                *new = *new * angle.sin() + old * angle.cos();
+            }
+        }
+        tail.done += count;
+        tail.offset = 0;
+        if tail.done >= LOOP_FADE {
+            self.tail = None;
         }
     }
 }
@@ -837,12 +1419,26 @@ struct Mixed {
     changed: bool,
 }
 
-/// DJ mode's playback: each deck's decoder and signal path, and the limiter.
+/// DJ mode's playback: each deck's decoder or in-memory song, its signal
+/// path, and the limiter.
 #[derive(Default)]
 struct Engine {
     decks: [DeckEngine; DECKS],
+    /// Decoders of decks that stream their song.
     slots: [Option<Decoding>; DECKS],
+    /// Readers of decks that play their song from memory.
+    readers: [Option<BufferReader>; DECKS],
     limiter: Limiter,
+    preload: Option<Preloads>,
+}
+
+/// This player's share of the preload pool.
+struct Preloads {
+    pool: Arc<Pool>,
+    player: usize,
+    /// The songs last asked for, and when.
+    asked: Vec<(u64, Need)>,
+    at: Option<Instant>,
 }
 
 impl Engine {
@@ -865,6 +1461,7 @@ impl Engine {
             changed: false,
         };
         let mut failed: [Option<(u64, u64, String)>; DECKS] = [None, None];
+        let mut ended: [Option<(u64, u64)>; DECKS] = [None, None];
         let Some(dj) = state.dj.as_mut() else {
             return mixed;
         };
@@ -886,13 +1483,20 @@ impl Engine {
                 .track
                 .as_ref()
                 .map(|playing| (playing.entry.id, playing.generation));
-            let source = self.slots[index]
+            let reader = self.readers[index]
                 .as_mut()
-                .filter(|running| {
+                .filter(|reader| play == Some(reader.play));
+            let from_memory = reader.is_some();
+            let feed = match reader {
+                Some(reader) => Feed::Memory(reader),
+                None => match self.slots[index].as_mut().filter(|running| {
                     play == Some((running.entry, running.generation)) && !running.retiring()
-                })
-                .map(|running| running as &mut dyn Source);
-            match engine.render(deck, gains[index], source) {
+                }) {
+                    Some(running) => Feed::Stream(running),
+                    None => Feed::Nothing,
+                },
+            };
+            match engine.render(deck, gains[index], feed) {
                 Rendered::Idle => {}
                 Rendered::Starved => {
                     if let Some(playing) = deck.track.as_mut()
@@ -912,6 +1516,11 @@ impl Engine {
                         mixed.heard[index] = play;
                     }
                     deck.position = engine.resampler.position() as u64;
+                    // A song played from memory ends when all of it played;
+                    // a streamed one when its decoder reports the end.
+                    if from_memory && engine.resampler.drained() {
+                        ended[index] = play;
+                    }
                     if let Some(playing) = deck.track.as_mut() {
                         playing.frames = deck.position / FRAME_SAMPLES;
                         if std::mem::take(&mut playing.buffering) {
@@ -938,6 +1547,11 @@ impl Engine {
                 mixed.changed |= state.deck_decoded(index, entry, generation, Err(error), now, at);
             }
         }
+        for (index, end) in ended.into_iter().enumerate() {
+            if let Some((entry, generation)) = end {
+                mixed.changed |= state.deck_decoded(index, entry, generation, Ok(()), now, at);
+            }
+        }
         mixed
     }
 }
@@ -952,10 +1566,18 @@ impl Player {
         configured_bitrate: u32,
         libraries: &[Library],
         start: &mut impl FnMut(Track, decode::Start) -> Decoding,
-        handover: Option<Decoding>,
-        held: Option<Vec<f32>>,
+        (handover, held): (Option<Decoding>, Option<Vec<f32>>),
+        preload: Option<(Arc<Pool>, usize)>,
     ) {
-        let mut engine = Engine::default();
+        let mut engine = Engine {
+            preload: preload.map(|(pool, player)| Preloads {
+                pool,
+                player,
+                asked: Vec::new(),
+                at: None,
+            }),
+            ..Engine::default()
+        };
         if let Some(decoding) = handover {
             {
                 let state = self.state();
@@ -988,6 +1610,13 @@ impl Player {
             if self.state().dj.is_none() {
                 if out.talking {
                     self.end(out).await;
+                }
+                engine.readers = [None, None];
+                if let Some(preloads) = engine.preload.as_mut()
+                    && !preloads.asked.is_empty()
+                {
+                    preloads.pool.want(preloads.player, &[]);
+                    preloads.asked.clear();
                 }
                 for running in engine.slots.iter_mut().flatten() {
                     if !running.retiring() {
@@ -1183,9 +1812,85 @@ impl Player {
         }
     }
 
-    /// Keeps, retires or starts each deck's decoder so that it plays the
-    /// deck's song from its position, one decoder per deck at most. Returns
-    /// when a start that waits after a failure is due.
+    /// Asks the preload pool for the songs this player needs in memory:
+    /// each deck's song and the song each deck loads next.
+    fn want_preloads(&self, engine: &mut Engine) {
+        let Some(preloads) = engine.preload.as_mut() else {
+            return;
+        };
+        let state = self.state();
+        let mut asked: Vec<(u64, Need, &Track)> = Vec::new();
+        if let Some(dj) = state.dj.as_ref() {
+            for deck in &dj.decks {
+                if let Some(playing) = deck.track.as_ref() {
+                    let need = if deck.playing {
+                        Need::Playing
+                    } else {
+                        Need::Loaded
+                    };
+                    asked.push((playing.entry.id, need, &playing.entry.track));
+                }
+            }
+            for deck in 0..DECKS {
+                if let Some(entry) = state.next_for(deck)
+                    && asked.iter().all(|(id, _, _)| *id != entry.id)
+                {
+                    asked.push((entry.id, Need::Next, &entry.track));
+                }
+            }
+        }
+        let summary: Vec<(u64, Need)> = asked.iter().map(|(id, need, _)| (*id, *need)).collect();
+        let stale = preloads
+            .at
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(1));
+        if summary == preloads.asked && !stale {
+            return;
+        }
+        let wants: Vec<Want> = asked
+            .iter()
+            .map(|(entry, need, track)| Want {
+                entry: *entry,
+                track: (*track).clone(),
+                need: *need,
+            })
+            .collect();
+        drop(state);
+        preloads.pool.want(preloads.player, &wants);
+        preloads.asked = summary;
+        preloads.at = Some(Instant::now());
+    }
+
+    /// Analyses the songs the decks load next once enough of them is in memory.
+    fn analyse_next(&self, engine: &Engine, libraries: &[Library]) {
+        let Some(preloads) = engine.preload.as_ref() else {
+            return;
+        };
+        let next: Vec<(u64, (String, String), Option<u32>)> = {
+            let state = self.state();
+            if state.dj.is_none() {
+                return;
+            }
+            (0..DECKS)
+                .filter_map(|deck| {
+                    let entry = state.next_for(deck)?;
+                    let key = libraries.get(entry.track.library)?.key().to_owned();
+                    Some((entry.id, (key, entry.track.id.clone()), entry.track.bpm))
+                })
+                .collect()
+        };
+        for (entry, key, bpm) in next {
+            if let Some(buffer) = preloads.pool.buffer(preloads.player, entry) {
+                preloads.pool.beats().consider(&key, &buffer, bpm);
+            }
+        }
+    }
+
+    /// Keeps, retires or starts what feeds each deck so that it plays the
+    /// deck's song from its position: the song in memory when the preload
+    /// pool holds it, otherwise one decoder per deck at most. A deck keeps
+    /// its source until the song or position changes; after a change it
+    /// first fades out what it played. Returns when a start that waits after
+    /// a failure is due.
     fn follow_decks(
         &self,
         engine: &mut Engine,
@@ -1194,82 +1899,211 @@ impl Player {
     ) -> Option<Instant> {
         let now = Instant::now();
         let mut due: Option<Instant> = None;
+        self.want_preloads(engine);
+        self.analyse_next(engine, libraries);
         for index in 0..DECKS {
-            {
-                let mut state = self.state();
-                if state.dj.as_ref().is_some_and(|dj| dj.decks[index].reload)
-                    && engine.decks[index].silent()
+            'deck: {
                 {
-                    if let Some(dj) = state.dj.as_mut() {
-                        dj.decks[index].reload = false;
+                    let mut state = self.state();
+                    if state.dj.as_ref().is_some_and(|dj| dj.decks[index].reload)
+                        && engine.decks[index].silent()
+                    {
+                        if let Some(dj) = state.dj.as_mut() {
+                            dj.decks[index].reload = false;
+                        }
+                        if state.load_next(index, wall_clock_ms) {
+                            self.cues[index].reset();
+                        }
+                        drop(state);
+                        self.changes.notify();
                     }
-                    if state.load_next(index, wall_clock_ms) {
-                        self.cues[index].reset();
+                }
+                let wanted = {
+                    let state = self.state();
+                    state.dj.as_ref().and_then(|dj| {
+                        let deck = &dj.decks[index];
+                        let playing = deck.track.as_ref()?;
+                        Some((playing.entry.id, playing.generation, deck.restart_at))
+                    })
+                };
+                let current = wanted.map(|(entry, generation, _)| (entry, generation));
+                let buffer = match (&engine.preload, current) {
+                    (Some(preloads), Some((entry, _))) => {
+                        preloads.pool.buffer(preloads.player, entry)
                     }
-                    drop(state);
-                    self.changes.notify();
+                    _ => None,
+                };
+                self.show_song(index, buffer.as_ref(), engine.preload.as_ref(), libraries);
+                // A song that outgrew its buffer streams from where the memory ends.
+                if let Some(reader) = engine.readers[index].as_ref()
+                    && Some(reader.play) == current
+                    && reader.buffer.fill() == Fill::Overflow
+                    && reader.next >= reader.buffer.frames()
+                {
+                    engine.readers[index] = None;
+                    engine.decks[index].bound = None;
+                    engine.decks[index].play = 0.0;
+                }
+                let buffer = buffer.filter(|buffer| buffer.fill() != Fill::Overflow);
+                let streaming = engine.slots[index].as_ref().is_some_and(|running| {
+                    current == Some((running.entry, running.generation)) && !running.retiring()
+                });
+                let reading = engine.readers[index]
+                    .as_ref()
+                    .is_some_and(|reader| Some(reader.play) == current);
+                if let Some(running) = engine.slots[index].as_mut()
+                    && !streaming
+                {
+                    if !running.retiring() {
+                        running.request_cancel();
+                    }
+                    if running.retired() {
+                        engine.slots[index] = None;
+                    }
+                }
+                if !reading {
+                    engine.readers[index] = None;
+                }
+                if streaming || reading {
+                    break 'deck;
+                }
+                let Some((_, _, restart_at)) = wanted else {
+                    break 'deck;
+                };
+                let deck_engine = &engine.decks[index];
+                if deck_engine.bound.is_some()
+                    && deck_engine.bound != current
+                    && deck_engine.play > 0.0
+                {
+                    // Fade out first; the next frame attaches.
+                    break 'deck;
+                }
+                if let Some(at) = restart_at
+                    && at > now
+                {
+                    due = Some(due.map_or(at, |due| due.min(at)));
+                    break 'deck;
+                }
+                if buffer.is_none() && engine.slots[index].is_some() {
+                    // The old decoder keeps the deck's slot until it has retired.
+                    break 'deck;
+                }
+                let request = {
+                    let mut state = self.state();
+                    state.dj.as_mut().and_then(|dj| {
+                        let deck = &mut dj.decks[index];
+                        deck.restart_at = None;
+                        let (position, ratio) = (deck.position, deck.ratio());
+                        let playing = deck.track.as_mut()?;
+                        if playing.source.is_none() {
+                            playing.source = libraries
+                                .get(playing.entry.track.library)
+                                .map(Library::identity);
+                        }
+                        let request = decode::Start {
+                            entry: playing.entry.id,
+                            generation: playing.generation,
+                            frames: position / FRAME_SAMPLES,
+                        };
+                        Some((playing.entry.track.clone(), request, position, ratio))
+                    })
+                };
+                let Some((track, request, position, ratio)) = request else {
+                    break 'deck;
+                };
+                let play = (request.entry, request.generation);
+                if let Some(buffer) = buffer {
+                    // From memory: the position may lie anywhere, also mid-frame.
+                    let first = position.saturating_sub(1);
+                    engine.readers[index] = Some(BufferReader {
+                        buffer,
+                        next: first,
+                        play,
+                    });
+                    engine.decks[index].attach(play, first, position, ratio);
+                } else {
+                    let first = request.frames * FRAME_SAMPLES;
+                    engine.slots[index] = Some(start(track, request));
+                    engine.decks[index].attach(play, first, position, ratio);
                 }
             }
-            let wanted = {
+            let reading = {
                 let state = self.state();
                 state.dj.as_ref().and_then(|dj| {
-                    let deck = &dj.decks[index];
-                    let playing = deck.track.as_ref()?;
-                    Some((playing.entry.id, playing.generation, deck.restart_at))
+                    let playing = dj.decks[index].track.as_ref()?;
+                    Some((playing.entry.id, playing.generation))
                 })
             };
-            if let Some(running) = engine.slots[index].as_mut() {
-                if wanted.is_some_and(|(entry, generation, _)| {
-                    (entry, generation) == (running.entry, running.generation)
-                }) && !running.retiring()
-                {
-                    continue;
-                }
-                if !running.retiring() {
-                    running.request_cancel();
-                }
-                if !running.retired() {
-                    continue;
-                }
-                engine.slots[index] = None;
-            }
-            let Some((_, _, restart_at)) = wanted else {
-                continue;
-            };
-            if let Some(at) = restart_at
-                && at > now
-            {
-                due = Some(due.map_or(at, |due| due.min(at)));
-                continue;
-            }
-            let request = {
-                let mut state = self.state();
-                state.dj.as_mut().and_then(|dj| {
-                    let deck = &mut dj.decks[index];
-                    deck.restart_at = None;
-                    let (position, ratio) = (deck.position, deck.ratio());
-                    let playing = deck.track.as_mut()?;
-                    if playing.source.is_none() {
-                        playing.source = libraries
-                            .get(playing.entry.track.library)
-                            .map(Library::identity);
-                    }
-                    let request = decode::Start {
-                        entry: playing.entry.id,
-                        generation: playing.generation,
-                        frames: position / FRAME_SAMPLES,
-                    };
-                    Some((playing.entry.track.clone(), request, position, ratio))
-                })
-            };
-            if let Some((track, request, position, ratio)) = request {
-                let play = (request.entry, request.generation);
-                let first = request.frames * FRAME_SAMPLES;
-                engine.slots[index] = Some(start(track, request));
-                engine.decks[index].attach(play, first, position, ratio);
+            let memory = engine.readers[index]
+                .as_ref()
+                .is_some_and(|reader| Some(reader.play) == reading);
+            if let Some(dj) = self.state().dj.as_mut() {
+                dj.decks[index].memory = memory;
             }
         }
         due
+    }
+
+    /// Shows how much of a deck's song is in memory, and its estimated
+    /// tempo and beat grid, analysing the song once enough of it is there.
+    fn show_song(
+        &self,
+        deck: usize,
+        buffer: Option<&Arc<Buffer>>,
+        preloads: Option<&Preloads>,
+        libraries: &[Library],
+    ) {
+        let song = {
+            let state = self.state();
+            state.dj.as_ref().and_then(|dj| {
+                let track = &dj.decks[deck].track.as_ref()?.entry.track;
+                let key = libraries.get(track.library)?.key().to_owned();
+                Some(((key, track.id.clone()), track.bpm))
+            })
+        };
+        let (analysing, analysis) = match (song, preloads) {
+            (Some((key, library_bpm)), Some(preloads)) => {
+                let beats = preloads.pool.beats();
+                let running =
+                    buffer.is_some_and(|buffer| beats.consider(&key, buffer, library_bpm));
+                (running, beats.get(&key))
+            }
+            _ => (false, None),
+        };
+        let estimate = analysis.and_then(|analysis| analysis.bpm);
+        let grid = analysis.and_then(|analysis| {
+            Some(BeatGrid {
+                bpm: analysis.grid_bpm?,
+                first: analysis.first_beat_ms? * 48.0,
+            })
+        });
+        let buffer = buffer.map(Arc::as_ref);
+        let (loaded, preloaded) = match buffer {
+            Some(buffer) => match buffer.fill() {
+                Fill::Partial | Fill::Complete => {
+                    (Some(buffer.frames()), buffer.fill() == Fill::Complete)
+                }
+                Fill::Failed(_) | Fill::Overflow => (None, false),
+            },
+            None => (None, false),
+        };
+        let mut state = self.state();
+        if let Some(dj) = state.dj.as_mut() {
+            let deck = &mut dj.decks[deck];
+            deck.loaded = loaded;
+            let changed = deck.preloaded != preloaded
+                || deck.analysing != analysing
+                || deck.estimate != estimate
+                || deck.grid != grid;
+            deck.preloaded = preloaded;
+            deck.analysing = analysing;
+            deck.estimate = estimate;
+            deck.grid = grid;
+            if changed {
+                drop(state);
+                self.changes.notify();
+            }
+        }
     }
 }
 
@@ -1469,6 +2303,91 @@ mod tests {
         assert!(state.history.is_empty());
     }
 
+    fn deck_queue(player: &Player, deck: usize) -> Vec<String> {
+        player.state().deck_queues[deck]
+            .iter()
+            .map(|entry| entry.track.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn deck_queues_feed_their_decks_before_the_main_queue() {
+        let player = player();
+        player.enqueue(vec![track("m1", None), track("m2", None)], "ada", None);
+        player.set_dj(true);
+        assert_eq!(deck_ids(&player), [Some("m1".into()), Some("m2".into())]);
+        let added = player
+            .dj_queue_add(0, vec![track("a1", None), track("a2", None)], "bo", None)
+            .unwrap();
+        assert_eq!(added, 2);
+        player
+            .dj_queue_add(0, vec![track("a0", None)], "bo", Some(0))
+            .unwrap();
+        assert_eq!(deck_queue(&player, 0), ["a0", "a1", "a2"]);
+        // An album: its first song goes onto the deck, the rest to the front
+        // of the deck's queue; deck B's unheard main-queue song goes back.
+        player
+            .dj_load(
+                1,
+                DeckSong::Library(
+                    vec![track("b1", None), track("b2", None), track("b3", None)],
+                    "cy".into(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(deck_ids(&player)[1].as_deref(), Some("b1"));
+        assert_eq!(deck_queue(&player, 1), ["b2", "b3"]);
+        assert_eq!(queued(&player), ["m2"]);
+        // Auto load takes deck A's own queue first; the unheard song returns to
+        // the main queue it came from.
+        let mut state = player.state();
+        assert!(state.load_next(0, now));
+        drop(state);
+        assert_eq!(deck_ids(&player)[0].as_deref(), Some("a0"));
+        assert_eq!(queued(&player), ["m1", "m2"]);
+        // A deck-queue song nobody heard returns to the front of that queue.
+        player.dj_eject(0).unwrap();
+        assert_eq!(deck_queue(&player, 0), ["a0", "a1", "a2"]);
+        // Moving entries between the queues.
+        let a1 = player.state().deck_queues[0][1].id;
+        player.dj_queue_move(a1, None, 0).unwrap();
+        assert_eq!(queued(&player), ["a1", "m1", "m2"]);
+        let m2 = player.state().queue[2].id;
+        player.dj_queue_move(m2, Some(1), 1).unwrap();
+        assert_eq!(deck_queue(&player, 1), ["b2", "m2", "b3"]);
+        player.dj_load(0, DeckSong::Queued(m2)).unwrap();
+        assert_eq!(deck_ids(&player)[0].as_deref(), Some("m2"));
+        player.dj_eject(0).unwrap();
+        assert_eq!(deck_queue(&player, 1), ["m2", "b2", "b3"]);
+        let b3 = player.state().deck_queues[1][2].id;
+        player.dj_queue_remove(b3).unwrap();
+        assert_eq!(player.dj_queue_remove(b3), Err(DjError::NotQueued));
+        // Deck queues stay while DJ mode is off.
+        player.set_dj(false);
+        assert_eq!(deck_queue(&player, 1), ["m2", "b2"]);
+        assert_eq!(player.dj_queue_clear(1), Err(DjError::Off));
+        player.set_dj(true);
+        player.dj_queue_clear(1).unwrap();
+        assert!(deck_queue(&player, 1).is_empty());
+    }
+
+    #[test]
+    fn deck_queues_share_the_main_queue_cap() {
+        let player = player();
+        player.set_dj(true);
+        let many: Vec<_> = (0..MAX_QUEUE + 3)
+            .map(|n| track(&n.to_string(), None))
+            .collect();
+        assert_eq!(player.dj_queue_add(0, many, "ada", None), Ok(MAX_QUEUE));
+        player.enqueue(vec![track("main", None)], "ada", None);
+        let id = player.state().queue[0].id;
+        assert_eq!(
+            player.dj_queue_move(id, Some(0), 0),
+            Err(DjError::QueueFull)
+        );
+        assert_eq!(queued(&player), ["main"]);
+    }
+
     #[test]
     fn controls_validate_state_and_clamp() {
         let player = player();
@@ -1483,7 +2402,7 @@ mod tests {
         player
             .dj_load(
                 0,
-                DeckSong::Library(Box::new(track("x", Some(120))), "ada".into()),
+                DeckSong::Library(vec![track("x", Some(120))], "ada".into()),
             )
             .unwrap();
         player.dj_tempo(0, 0.5).unwrap();
@@ -1512,14 +2431,14 @@ mod tests {
         player
             .dj_load(
                 0,
-                DeckSong::Library(Box::new(track("a", Some(120))), "ada".into()),
+                DeckSong::Library(vec![track("a", Some(120))], "ada".into()),
             )
             .unwrap();
         assert_eq!(player.dj_sync(0), Err(DjError::NoBpm));
         player
             .dj_load(
                 1,
-                DeckSong::Library(Box::new(track("b", Some(125))), "ada".into()),
+                DeckSong::Library(vec![track("b", Some(125))], "ada".into()),
             )
             .unwrap();
         player.dj_tempo(1, 0.04).unwrap();
@@ -1534,7 +2453,7 @@ mod tests {
         player
             .dj_load(
                 1,
-                DeckSong::Library(Box::new(track("c", Some(174))), "ada".into()),
+                DeckSong::Library(vec![track("c", Some(174))], "ada".into()),
             )
             .unwrap();
         assert_eq!(player.dj_sync(0), Err(DjError::OutOfRange));
@@ -1545,10 +2464,7 @@ mod tests {
         let player = player();
         player.set_dj(true);
         player
-            .dj_load(
-                0,
-                DeckSong::Library(Box::new(track("a", None)), "ada".into()),
-            )
+            .dj_load(0, DeckSong::Library(vec![track("a", None)], "ada".into()))
             .unwrap();
         player.dj_tempo(0, -0.08).unwrap();
         player.dj_seek(0, Duration::from_millis(10_010)).unwrap();
@@ -1567,10 +2483,7 @@ mod tests {
         let player = player();
         player.set_dj(true);
         player
-            .dj_load(
-                0,
-                DeckSong::Library(Box::new(track("a", None)), "ada".into()),
-            )
+            .dj_load(0, DeckSong::Library(vec![track("a", None)], "ada".into()))
             .unwrap();
         player.dj_seek(0, Duration::from_millis(1_005)).unwrap();
         player.dj_tempo(0, 0.08).unwrap();
@@ -1848,6 +2761,7 @@ mod tests {
             96_000,
             output,
             starts.starter(),
+            None,
         ));
         settle().await;
         assert_eq!(starts.count(), 1, "the queue plays a");
@@ -1882,5 +2796,335 @@ mod tests {
         assert_eq!(starts.count(), 1, "then exactly one queue decoder starts");
         assert!(player.state().current.is_some());
         task.abort();
+    }
+
+    fn timed(id: &str, seconds: u32) -> Track {
+        let mut song = track(id, None);
+        song.duration = Some(seconds);
+        song
+    }
+
+    fn deck_state(player: &Player, deck: usize) -> Deck {
+        player.state().dj.as_ref().unwrap().decks[deck].clone()
+    }
+
+    fn engine_with_pool(starts: &crate::preload::tests::Starts) -> Engine {
+        Engine {
+            preload: Some(Preloads {
+                pool: Pool::new(1 << 30, starts.starter(), crate::beats::Beats::memory()),
+                player: 0,
+                asked: Vec::new(),
+                at: None,
+            }),
+            ..Engine::default()
+        }
+    }
+
+    fn no_start(_: Track, _: decode::Start) -> Decoding {
+        panic!("decks with songs in memory start no decoder of their own")
+    }
+
+    async fn feed_frames(sender: &mpsc::Sender<decode::Frame>, from: usize, to: usize) {
+        for frame in from..to {
+            let samples = (0..FRAME)
+                .flat_map(|index| {
+                    let at = (frame * FRAME + index) as f32 / 48.0;
+                    [(std::f32::consts::TAU * at).sin() * 0.5; CHANNELS]
+                })
+                .collect();
+            sender.send(Ok(samples)).await.unwrap();
+        }
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn step(player: &Arc<Player>, engine: &mut Engine) -> Mixed {
+        player.follow_decks(engine, &[], &mut no_start);
+        engine.mix(&mut player.state(), now, Instant::now())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cue_jumps_in_memory_play_in_the_next_frame_and_later_ones_wait_for_decoding() {
+        let player = player();
+        player.enqueue(vec![timed("a", 60), timed("b", 60)], "ada", None);
+        player.set_dj(true);
+        player.dj_play(0, true).unwrap();
+        let starts = crate::preload::tests::Starts::default();
+        let mut engine = engine_with_pool(&starts);
+        step(&player, &mut engine);
+        let a = deck_state(&player, 0).track.unwrap().entry.id;
+        let b = deck_state(&player, 1).track.unwrap().entry.id;
+        // Both decks' songs preload; neither starts a decoder of its own.
+        assert_eq!(starts.entries(), [a, b]);
+        let decoder = starts.take(a);
+        feed_frames(&decoder.sender, 0, 1_000).await;
+        for _ in 0..30 {
+            assert!(step(&player, &mut engine).audio);
+        }
+        assert_eq!(deck_state(&player, 0).loaded, Some(1_000 * FRAME_SAMPLES));
+        // A jump inside the decoded part: one frame fades out, the next plays
+        // from the new position; the deck never shows buffering.
+        player.dj_seek(0, Duration::from_secs(10)).unwrap();
+        let fade = step(&player, &mut engine);
+        assert!(fade.audio && !deck_state(&player, 0).track.unwrap().buffering);
+        let jumped = step(&player, &mut engine);
+        assert!(jumped.audio);
+        let deck = deck_state(&player, 0);
+        assert!(!deck.track.as_ref().unwrap().buffering);
+        assert_eq!(deck.position, 480_000 + FRAME_SAMPLES);
+        // A jump past it waits for decoding, then plays from there.
+        player.dj_seek(0, Duration::from_secs(40)).unwrap();
+        step(&player, &mut engine);
+        let waiting = step(&player, &mut engine);
+        assert!(!waiting.audio);
+        assert!(deck_state(&player, 0).track.unwrap().buffering);
+        feed_frames(&decoder.sender, 1_000, 2_200).await;
+        assert!(step(&player, &mut engine).audio);
+        let deck = deck_state(&player, 0);
+        assert!(!deck.track.as_ref().unwrap().buffering);
+        assert_eq!(deck.position, 40 * 48_000 + FRAME_SAMPLES);
+        // The decoder is reaped once done; leaving frees the memory.
+        drop(decoder.sender);
+        decoder.terminal.send(Ok(())).unwrap();
+        decoder.finish.send(Ok(())).unwrap();
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let pool = engine.preload.as_ref().unwrap().pool.clone();
+        assert_eq!(pool.decoding(), 1, "deck B's song still decodes");
+        assert!(
+            deck_state(&player, 0).preloaded || pool.buffer(0, a).unwrap().fill() == Fill::Complete
+        );
+        // Ejected unheard, the song returns to the queue and stays as a next song.
+        player.dj_eject(0).unwrap();
+        step(&player, &mut engine);
+        assert!(pool.buffer(0, a).is_some());
+        player.dj_queue_remove(a).unwrap();
+        step(&player, &mut engine);
+        assert!(
+            pool.buffer(0, a).is_none(),
+            "a song that left frees its buffer"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_next_song_of_a_deck_queue_preloads() {
+        let player = player();
+        player.set_dj(true);
+        player
+            .dj_queue_add(0, vec![timed("next", 120)], "ada", None)
+            .unwrap();
+        let starts = crate::preload::tests::Starts::default();
+        let mut engine = engine_with_pool(&starts);
+        step(&player, &mut engine);
+        let next = player.state().deck_queues[0][0].id;
+        assert_eq!(starts.entries(), [next]);
+        // Loading it takes the buffer that is already decoding.
+        player.dj_load(0, DeckSong::Queued(next)).unwrap();
+        step(&player, &mut engine);
+        assert!(
+            engine.readers[0]
+                .as_ref()
+                .is_some_and(|reader| reader.play.0 == next)
+        );
+        assert_eq!(starts.entries(), [next], "no second decoder for it");
+    }
+
+    /// Deck A with `buffer` in memory, playing from `position`.
+    fn looping_deck(buffer: Arc<Buffer>, position: u64, tempo: f32) -> (Arc<Player>, Engine) {
+        let player = player();
+        player.enqueue(vec![timed("a", 60)], "ada", None);
+        player.set_dj(true);
+        player.dj_play(0, true).unwrap();
+        player.dj_tempo_range(0, 16).unwrap();
+        player.dj_tempo(0, tempo).unwrap();
+        let play = {
+            let mut state = player.state();
+            let deck = &mut state.dj.as_mut().unwrap().decks[0];
+            deck.position = position;
+            deck.loaded = Some(buffer.frames());
+            deck.memory = true;
+            let playing = deck.track.as_ref().unwrap();
+            (playing.entry.id, playing.generation)
+        };
+        let mut engine = Engine::default();
+        let first = position.saturating_sub(1);
+        engine.readers[0] = Some(BufferReader {
+            buffer,
+            next: first,
+            play,
+        });
+        engine.decks[0].attach(play, first, position, 1.0 + f64::from(tempo));
+        (player, engine)
+    }
+
+    #[test]
+    fn a_loop_repeats_its_exact_length_at_any_tempo() {
+        for tempo in [0.0, 0.08, -0.12] {
+            let buffer = crate::preload::test_buffers::from_fn(60 * 48_000, |_| 0.25);
+            let (player, mut engine) = looping_deck(buffer, 100_000, tempo);
+            player.dj_quantize(0, false).unwrap();
+            player.dj_loop_in(0).unwrap();
+            player.state().dj.as_mut().unwrap().decks[0].position = 104_800;
+            player.dj_loop_out(0).unwrap();
+            let looping = deck_state(&player, 0).looping.unwrap();
+            assert_eq!((looping.start, looping.end), (100_000.0, Some(104_800.0)));
+            assert!(looping.active);
+            player.state().dj.as_mut().unwrap().decks[0].position = 100_000;
+            let ratio = 1.0 + f64::from(tempo);
+            let mut song_time = 0.0;
+            for _ in 0..200 {
+                engine.mix(&mut player.state(), now, Instant::now());
+                song_time += FRAME as f64 * ratio;
+                let expected = 100_000.0 + song_time.rem_euclid(4_800.0);
+                let position = engine.decks[0].resampler.position();
+                assert!(
+                    (position - expected).abs() < 1e-6 || (position - expected).abs() > 4_799.0,
+                    "tempo {tempo}: {position} vs {expected}"
+                );
+                assert!((100_000.0..104_800.0).contains(&position));
+            }
+        }
+    }
+
+    #[test]
+    fn a_loop_wraps_with_a_short_crossfade() {
+        // A ramp: the loop's end and start differ by half of full scale.
+        let buffer = crate::preload::test_buffers::from_fn(60 * 48_000, |index| {
+            (index % 96_000) as f32 / 96_000.0 - 0.5
+        });
+        let (player, mut engine) = looping_deck(buffer, 0, 0.0);
+        player.dj_quantize(0, false).unwrap();
+        player.dj_loop_in(0).unwrap();
+        player.state().dj.as_mut().unwrap().decks[0].position = 48_000;
+        player.dj_loop_out(0).unwrap();
+        player.state().dj.as_mut().unwrap().decks[0].position = 40_000;
+        let mut largest: f32 = 0.0;
+        let mut previous: Option<f32> = None;
+        for _ in 0..120 {
+            let mixed = engine.mix(&mut player.state(), now, Instant::now());
+            // The cue is the deck before its fader: the signal path's output.
+            for pair in engine.decks[0].cue.as_chunks::<CHANNELS>().0 {
+                if let Some(previous) = previous {
+                    largest = largest.max((pair[0] - previous).abs());
+                }
+                previous = Some(pair[0]);
+            }
+            assert!(mixed.audio);
+        }
+        // A cut would jump by 0.5; the 5 ms equal-power crossfade moves at
+        // most a few thousandths per sample.
+        assert!(largest < 0.02, "largest step {largest}");
+    }
+
+    #[test]
+    fn beat_loops_quantise_to_the_grid_and_halve_double_and_move() {
+        for bpm in [100.0, 128.0, 174.0] {
+            let buffer = crate::preload::test_buffers::from_fn(60 * 48_000, |_| 0.1);
+            let (player, _engine) = looping_deck(buffer, 300_000, 0.0);
+            let grid = BeatGrid {
+                bpm,
+                first: 4_321.0,
+            };
+            player.state().dj.as_mut().unwrap().decks[0].grid = Some(grid);
+            let period = grid.period();
+            for beats in [0.25, 0.5, 1.0, 4.0, 16.0, 32.0] {
+                player.dj_beat_loop(0, beats).unwrap();
+                let looping = deck_state(&player, 0).looping.unwrap();
+                assert!((looping.start - grid.floor(300_000.0)).abs() < 1e-6);
+                assert!(
+                    (looping.end.unwrap() - looping.start - beats * period).abs() < 1e-6,
+                    "{bpm} {beats}"
+                );
+            }
+            player.dj_beat_loop(0, 4.0).unwrap();
+            player.dj_loop_resize(0, 0.5).unwrap();
+            let length = |player: &Player| {
+                let looping = deck_state(player, 0).looping.unwrap();
+                looping.end.unwrap() - looping.start
+            };
+            assert!((length(&player) - 2.0 * period).abs() < 1e-6);
+            player.dj_loop_resize(0, 2.0).unwrap();
+            player.dj_loop_resize(0, 2.0).unwrap();
+            assert!((length(&player) - 8.0 * period).abs() < 1e-6);
+            let start = deck_state(&player, 0).looping.unwrap().start;
+            player.dj_loop_move(0, false, 1.0).unwrap();
+            assert!(
+                (deck_state(&player, 0).looping.unwrap().start - start - 8.0 * period).abs() < 1e-6
+            );
+            player.dj_loop_move(0, true, -1.0).unwrap();
+            assert!(
+                (deck_state(&player, 0).looping.unwrap().start - start - 7.0 * period).abs() < 1e-6
+            );
+            // Bounds: at most 64 beats, at least a quarter beat.
+            for _ in 0..10 {
+                player.dj_loop_resize(0, 2.0).unwrap();
+            }
+            assert!((length(&player) - 64.0 * period).abs() < 1e-6);
+            for _ in 0..20 {
+                player.dj_loop_resize(0, 0.5).unwrap();
+            }
+            assert!((length(&player) - period / 4.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn loop_points_snap_to_beats_when_quantising_and_stay_free_otherwise() {
+        let buffer = crate::preload::test_buffers::from_fn(60 * 48_000, |_| 0.1);
+        let (player, _engine) = looping_deck(buffer, 77_000, 0.0);
+        let set_position = |position: u64| {
+            player.state().dj.as_mut().unwrap().decks[0].position = position;
+        };
+        player.state().dj.as_mut().unwrap().decks[0].grid = Some(BeatGrid {
+            bpm: 120.0,
+            first: 0.0,
+        });
+        player.dj_loop_in(0).unwrap();
+        set_position(133_000);
+        player.dj_loop_out(0).unwrap();
+        let looping = deck_state(&player, 0).looping.unwrap();
+        assert_eq!((looping.start, looping.end), (72_000.0, Some(144_000.0)));
+        player.dj_quantize(0, false).unwrap();
+        set_position(77_000);
+        player.dj_loop_in(0).unwrap();
+        set_position(133_000);
+        player.dj_loop_out(0).unwrap();
+        let looping = deck_state(&player, 0).looping.unwrap();
+        assert_eq!((looping.start, looping.end), (77_000.0, Some(133_000.0)));
+        // Without a grid or BPM, beat loops have no length to use.
+        player.state().dj.as_mut().unwrap().decks[0].grid = None;
+        assert_eq!(player.dj_beat_loop(0, 4.0), Err(DjError::NoBpm));
+        // Free loops last 10 ms to 60 s.
+        for _ in 0..10 {
+            player.dj_loop_resize(0, 2.0).unwrap();
+        }
+        let looping = deck_state(&player, 0).looping.unwrap();
+        assert_eq!(looping.end.unwrap() - looping.start, MAX_LOOP_SAMPLES);
+    }
+
+    #[test]
+    fn seeks_outside_a_loop_end_it_and_loops_need_the_song_in_memory() {
+        let buffer = crate::preload::test_buffers::from_fn(60 * 48_000, |_| 0.1);
+        let (player, _engine) = looping_deck(buffer, 96_000, 0.0);
+        player.state().dj.as_mut().unwrap().decks[0].grid = Some(BeatGrid {
+            bpm: 120.0,
+            first: 0.0,
+        });
+        player.dj_beat_loop(0, 4.0).unwrap();
+        player.dj_seek(0, Duration::from_millis(2_500)).unwrap();
+        assert!(
+            deck_state(&player, 0).looping.unwrap().active,
+            "inside the loop it plays on"
+        );
+        player.dj_seek(0, Duration::from_secs(20)).unwrap();
+        assert!(!deck_state(&player, 0).looping.unwrap().active);
+        // Reloop: back to the loop's start.
+        player.dj_loop_toggle(0).unwrap();
+        let deck = deck_state(&player, 0);
+        assert!(deck.looping.unwrap().active);
+        assert_eq!(deck.position, 96_000);
+        player.state().dj.as_mut().unwrap().decks[0].memory = false;
+        assert_eq!(player.dj_loop_toggle(0), Err(DjError::Streaming));
     }
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! A Mumble music bot: plays songs from Subsonic servers in one or more
 //! channels; people control the queues on a web page they get a link to.
+mod beats;
+mod bpm;
 mod config;
 mod covers;
 mod decode;
@@ -8,13 +10,11 @@ mod import;
 mod library_keys;
 mod mumble;
 mod persist;
-#[cfg_attr(not(test), expect(dead_code, reason = "the DJ engine uses it from the next commit"))]
-mod bpm;
 mod player;
-#[cfg_attr(not(test), expect(dead_code, reason = "the DJ engine uses it from the next commit"))]
-mod spectrum;
 mod playlists;
+mod preload;
 mod scrobble;
+mod spectrum;
 mod subsonic;
 mod tokens;
 mod web;
@@ -60,6 +60,8 @@ pub struct Bot {
     /// The fixed codec worker beside this executable (`nuschl_ipc::musicbot::worker_path`).
     pub codec_worker: PathBuf,
     pub libraries: Arc<Vec<Library>>,
+    /// DJ songs decoded ahead into memory; None when `audio.preload_mib` is 0.
+    pub preload: Option<Arc<preload::Pool>>,
     /// One per configured channel, in the same order; a channel can play another's.
     pub players: Vec<Arc<Player>>,
     pub connections: Vec<Connection>,
@@ -200,11 +202,24 @@ async fn run(arguments: Arguments) -> Result<(), String> {
         );
         covers::CoverCache::disabled()
     });
+    let libraries = Arc::new(libraries);
+    let preload = (config.audio.preload_mib > 0).then(|| {
+        let libraries = libraries.clone();
+        let worker = codec_worker.clone();
+        preload::Pool::new(
+            config.audio.preload_mib as usize * 1024 * 1024,
+            Arc::new(move |track, start| {
+                decode::start(libraries.clone(), worker.clone(), track, start)
+            }),
+            beats::Beats::open(&state_directory),
+        )
+    });
     let bot = Arc::new(Bot {
         state_directory,
         web_assets: arguments.web_assets,
         codec_worker,
-        libraries: Arc::new(libraries),
+        libraries,
+        preload,
         players,
         connections,
         tokens,
@@ -240,11 +255,12 @@ async fn run(arguments: Arguments) -> Result<(), String> {
             }
         });
     }
-    for player in &bot.players {
+    for (index, player) in bot.players.iter().enumerate() {
         tokio::spawn(player.clone().run(
             bot.libraries.clone(),
             bot.config.audio.bitrate,
             bot.codec_worker.clone(),
+            bot.preload.clone().map(|pool| (pool, index)),
         ));
     }
     for index in 0..bot.connections.len() {
